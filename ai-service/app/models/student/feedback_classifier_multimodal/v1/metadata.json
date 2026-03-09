@@ -1,0 +1,21 @@
+{
+  "dataset_version": "student_feedback_multimodal_v1",
+  "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
+  "fusion_type": "attn+gated_concat",
+  "modalities": [
+    "text",
+    "ocr",
+    "audio",
+    "table"
+  ],
+  "format": "onnx",
+  "metrics": {},
+  "role": "student",
+  "model_name": "feedback_classifier_multimodal",
+  "version": "v1",
+  "artifact_path": "/app/app/models/student/feedback_classifier_multimodal/v1/model.onnx",
+  "extra_artifacts": [
+    "/app/app/models/student/feedback_classifier_multimodal/v1/model.onnx.data",
+    "/app/app/models/student/feedback_classifier_multimodal/v1/feedback_classifier_multimodal.temperature.json"
+  ]
+}

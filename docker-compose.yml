@@ -1,0 +1,310 @@
+services:
+  backend:
+    build:
+      context: ./backend
+    env_file:
+      - ./backend/.env
+    environment:
+      CLAMD_HOST: clamav
+      CLAMD_PORT: "3310"
+
+      MAX_UPLOAD_BYTES: "50000000"
+      MAX_AUDIO_BYTES: "30000000"
+      MAX_VIDEO_BYTES: "50000000"
+
+      PARSER_URL: http://parser:8020
+      PARSER_SECRET: dev_parser_secret
+
+      AI_SERVICE_URL: http://ai-service:8010
+      AI_SERVICE_SECRET: dev_ai_secret
+
+      LLM_SERVICE_URL: http://llm-service:8030
+      LLM_SERVICE_SECRET: dev_llm_secret
+    depends_on:
+      - clamav
+      - parser
+      - ai-service
+      - llm-service
+    networks:
+      - internal
+    volumes:
+      - ./backend:/app
+      - scan_files:/scan_files
+    ports:
+      - "127.0.0.1:8000:8000"
+    restart: unless-stopped
+    healthcheck:
+      test: >
+        python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).read()"
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 20s
+
+  worker-light:
+    build:
+      context: ./backend
+    env_file:
+      - ./backend/.env
+    environment:
+      WORKER_ID: ingestion-worker-light-1
+      PYTHONUNBUFFERED: "1"
+      WORKER_MODE: "light"
+
+      # ✅ FIX: make workers call backend via docker service DNS
+      BACKEND_HOST: backend
+      BACKEND_URL: http://backend:8000
+      API_BASE_URL: http://backend:8000
+      RPC_BASE_URL: http://backend:8000
+      INGESTION_RPC_URL: http://backend:8000
+
+      PARSER_URL: http://parser:8020
+      PARSER_SECRET: dev_parser_secret
+
+      AI_SERVICE_URL: http://ai-service:8010
+      AI_SERVICE_SECRET: dev_ai_secret
+
+      LLM_SERVICE_URL: http://llm-service:8030
+      LLM_SERVICE_SECRET: dev_llm_secret
+
+      SIGNED_URL_EXPIRES_SECONDS: "60"
+      INGESTION_POLL_SECONDS: "2"
+      INGESTION_MAX_ATTEMPTS: "3"
+      INGESTION_LOCK_TIMEOUT_SECONDS: "600"
+      WORKER_MAX_TEXT_CHARS: "200000"
+    depends_on:
+      # ✅ FIX: ensure backend is up before workers start claiming jobs
+      - backend
+      - parser
+      - ai-service
+      - llm-service
+    networks:
+      - internal
+      - egress
+    volumes:
+      # ✅ FIX: workers need access to /scan_files
+      - scan_files:/scan_files
+    working_dir: /app
+    command: ["python", "-u", "worker_main.py"]
+    restart: unless-stopped
+
+  worker-heavy:
+    build:
+      context: ./backend
+    env_file:
+      - ./backend/.env
+    environment:
+      WORKER_ID: ingestion-worker-heavy-1
+      PYTHONUNBUFFERED: "1"
+      WORKER_MODE: "heavy"
+
+      # ✅ FIX: make workers call backend via docker service DNS
+      BACKEND_HOST: backend
+      BACKEND_URL: http://backend:8000
+      API_BASE_URL: http://backend:8000
+      RPC_BASE_URL: http://backend:8000
+      INGESTION_RPC_URL: http://backend:8000
+
+      PARSER_URL: http://parser:8020
+      PARSER_SECRET: dev_parser_secret
+
+      AI_SERVICE_URL: http://ai-service:8010
+      AI_SERVICE_SECRET: dev_ai_secret
+
+      LLM_SERVICE_URL: http://llm-service:8030
+      LLM_SERVICE_SECRET: dev_llm_secret
+
+      SIGNED_URL_EXPIRES_SECONDS: "60"
+      INGESTION_POLL_SECONDS: "2"
+      INGESTION_MAX_ATTEMPTS: "3"
+      INGESTION_LOCK_TIMEOUT_SECONDS: "600"
+
+      MAX_AUDIO_BYTES: "30000000"
+      MAX_VIDEO_BYTES: "50000000"
+      MAX_AUDIO_SECONDS: "600"
+      MAX_VIDEO_SECONDS: "600"
+      AUDIO_SEGMENT_SECONDS: "300"
+
+      WHISPER_MODEL: "base"
+    depends_on:
+      # ✅ FIX: ensure backend is up before workers start claiming jobs
+      - backend
+      - parser
+      - ai-service
+      - llm-service
+    networks:
+      - internal
+      - egress
+    volumes:
+      # ✅ FIX: workers need access to /scan_files
+      - scan_files:/scan_files
+    working_dir: /app
+    command: ["python", "-u", "worker_main.py"]
+    restart: unless-stopped
+
+  prof-worker-heavy:
+    build:
+      context: ./backend
+    env_file:
+      - ./backend/.env
+    environment:
+      PROF_WORKER_ID: prof-worker-heavy-1
+      PYTHONUNBUFFERED: "1"
+      PROF_WORKER_MODE: "heavy"
+
+      # ✅ FIX: same backend/RPC base for professor worker
+      BACKEND_HOST: backend
+      BACKEND_URL: http://backend:8000
+      API_BASE_URL: http://backend:8000
+      RPC_BASE_URL: http://backend:8000
+      INGESTION_RPC_URL: http://backend:8000
+
+      PARSER_URL: http://parser:8020
+      PARSER_SECRET: dev_parser_secret
+
+      AI_SERVICE_URL: http://ai-service:8010
+      AI_SERVICE_SECRET: dev_ai_secret
+
+      LLM_SERVICE_URL: http://llm-service:8030
+      LLM_SERVICE_SECRET: dev_llm_secret
+
+      SIGNED_URL_EXPIRES_SECONDS: "60"
+      PROF_INGESTION_POLL_SECONDS: "2"
+      PROF_INGESTION_MAX_ATTEMPTS: "3"
+      PROF_INGESTION_LOCK_TIMEOUT_SECONDS: "600"
+      PROF_WORKER_MAX_TEXT_CHARS: "200000"
+
+      PROF_MAX_AUDIO_BYTES: "30000000"
+      PROF_MAX_VIDEO_BYTES: "50000000"
+      PROF_MAX_AUDIO_SECONDS: "600"
+      PROF_MAX_VIDEO_SECONDS: "600"
+      PROF_AUDIO_SEGMENT_SECONDS: "300"
+
+      PROF_WHISPER_MODEL: "base"
+    depends_on:
+      - backend
+      - parser
+      - ai-service
+      - llm-service
+    networks:
+      - internal
+      - egress
+    volumes:
+      - scan_files:/scan_files
+    working_dir: /app
+    command: ["python", "-u", "prof_worker_main.py"]
+    restart: unless-stopped
+
+  parser:
+    build:
+      context: ./parser
+    environment:
+      PARSER_SECRET: dev_parser_secret
+      MAX_PARSE_BYTES: "52428800"
+      MAX_TEXT_CHARS: "200000"
+      MAX_TABLES: "25"
+      MAX_ROWS_TOTAL: "50000"
+      MAX_IMAGES: "50"
+
+      ENABLE_TRANSCRIBE: "1"
+      WHISPER_MODEL: "tiny"
+      MAX_MEDIA_SECONDS: "900"
+
+      XDG_CACHE_HOME: /data/cache
+    networks:
+      - internal
+      - egress
+    volumes:
+      - whisper_cache:/data/cache
+      - ./parser:/app
+    restart: unless-stopped
+    healthcheck:
+      test: >
+        python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8020/health', timeout=2).read()"
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 20s
+
+  ai-service:
+    build:
+      context: ./ai-service
+    env_file:
+      - ./ai-service/.env
+    environment:
+      HF_HOME: /data/hf
+      TRANSFORMERS_CACHE: /data/hf
+      HUGGINGFACE_HUB_CACHE: /data/hf
+
+      SUPABASE_URL: ${SUPABASE_URL}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
+
+      MODELS_DIR: /app/app/models
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8010"]
+    networks:
+      - internal
+      - egress
+    volumes:
+      - hf_cache:/data/hf
+      - ./ai-service:/app
+    ports:
+      - "127.0.0.1:8010:8010"
+    restart: unless-stopped
+    healthcheck:
+      test: >
+        python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8010/health', timeout=2).read()"
+      interval: 10s
+      timeout: 3s
+      retries: 15
+      start_period: 30s
+
+  clamav:
+    image: clamav/clamav:stable
+    container_name: clamav
+    restart: unless-stopped
+    expose:
+      - "3310"
+    volumes:
+      - clamav_db:/var/lib/clamav
+      - scan_files:/scan_files
+    networks:
+      - internal
+      - egress
+
+  llm-service:
+    build:
+      context: ./llm-service
+    environment:
+      OLLAMA_BASE_URL: "http://host.docker.internal:11434"
+      OLLAMA_PRIMARY_MODEL: "mistral"
+      OLLAMA_FALLBACK_MODEL: "phi3"
+      LLM_TIMEOUT_SECONDS: "180"
+      LLM_MAX_INPUT_CHARS: "50000"
+      LLM_MAX_RETRIES: "1"
+      LLM_SERVICE_SECRET: dev_llm_secret
+    networks:
+      - internal
+    expose:
+      - "8030"
+    ports:
+      - "127.0.0.1:8030:8030"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    healthcheck:
+      test: >
+        python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8030/health', timeout=2).read()"
+      interval: 10s
+      timeout: 3s
+      retries: 15
+      start_period: 20s
+
+networks:
+  internal: {}
+  egress: {}
+
+volumes:
+  clamav_db: {}
+  hf_cache: {}
+  whisper_cache: {}
+  scan_files: {}

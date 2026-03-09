@@ -1,0 +1,12 @@
+**/__pycache__/
+**/.venv/
+**/venv/
+**/.git/
+**/.vscode/
+**/.cache/
+**/node_modules/
+**/app/models/
+**/models/
+**/data/
+**/hf_cache/
+**/whisper_cache/

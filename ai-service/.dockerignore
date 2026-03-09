@@ -1,0 +1,31 @@
+# Python junk
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+
+# Local caches
+.cache/
+.ipynb_checkpoints/
+*.log
+
+# HuggingFace / transformers caches (never send to build context)
+data/
+hf_cache/
+whisper_cache/
+**/.huggingface/
+**/transformers_cache/
+
+# Your heavy ML artifacts (mount at runtime instead)
+app/models/
+models/
+
+# Git / IDE
+.git/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db

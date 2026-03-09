@@ -1,0 +1,29 @@
+{
+  "model_name": "feedback_classifier",
+  "version": "v1",
+  "role": "student",
+  "framework": "transformers",
+  "base_model": "distilbert-base-uncased",
+  "metrics": {
+    "eval_loss": 0.5862286686897278,
+    "eval_accuracy": 0.8210472052433905,
+    "eval_f1": 0.8201972963200905,
+    "eval_runtime": 56.0828,
+    "eval_samples_per_second": 242.124,
+    "eval_steps_per_second": 60.536,
+    "epoch": 3.0
+  },
+  "num_labels": 7,
+  "dataset_path": "datasets/processed/student_feedback_v1",
+  "max_steps": -1,
+  "artifact": "model.onnx",
+  "label_map": {
+    "0": "grammar",
+    "1": "structure",
+    "2": "clarity",
+    "3": "evidence",
+    "4": "argument",
+    "5": "other",
+    "6": "style"
+  }
+}

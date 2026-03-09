@@ -1,0 +1,43 @@
+{
+  "dataset_version": "prof_multimodal_v1",
+  "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
+  "fusion_type": "attn+gated_concat",
+  "modalities": [
+    "text",
+    "ocr",
+    "audio",
+    "table"
+  ],
+  "format": "onnx",
+  "metrics": {},
+  "role": "professor",
+  "model_name": "rubric_suite_multimodal",
+  "version": "v1",
+  "artifact_path": "/app/app/models/professor/rubric_suite_multimodal/v1/rubric_suite_multimodal.onnx",
+  "extra_artifacts": [
+    "/app/app/models/professor/rubric_suite_multimodal/v1/rubric_suite_multimodal.onnx.data"
+  ],
+  "head_order": [
+    "rubric_band",
+    "argument_depth",
+    "moderation_consistency"
+  ],
+  "label_maps": {
+    "rubric_band": {
+      "0": "ineffective",
+      "1": "adequate",
+      "2": "effective"
+    },
+    "argument_depth": {
+      "0": "shallow",
+      "1": "basic",
+      "2": "developed",
+      "3": "deep"
+    },
+    "moderation_consistency": {
+      "0": "inconsistent",
+      "1": "mixed",
+      "2": "consistent"
+    }
+  }
+}
