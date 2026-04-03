@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Sequence
 
 import httpx
+from app.registry.filesystem_store import resolve_models_root
 
 # NOTE:
 # - ModelBundle + load_model_by_extension come from your app/registry/loader.py
@@ -13,11 +14,8 @@ import httpx
 #   returns a raw session/model, update loader.py accordingly.
 from app.registry.loader import ModelBundle, load_model_by_extension
 
-# Root folder where models are stored in-container
-# Your project stores models under /app/app/models (based on your screenshot),
-# so default to that. You can override with MODELS_DIR env var.
-# Prefer MODELS_DIR if set, otherwise pick the correct default for your repo mount
-MODELS_ROOT = Path(os.getenv("MODELS_DIR") or "/app/app/models")
+# Shared model root resolution used by both filesystem and registry helpers.
+MODELS_ROOT = resolve_models_root()
 
 
 def get_model_dir(role: str, model_name: str, version: str) -> Path:

@@ -1,0 +1,3 @@
+A strong academic essay normally includes an introduction, a logically organised main body, and a conclusion. The introduction should identify the topic, define the focus of the discussion, and present the central argument or purpose. The main body should be organised into paragraphs, with each paragraph focusing on one clear idea supported by explanation and evidence. The conclusion should summarise the argument without introducing new evidence.
+
+Essay structure should help the reader follow the line of reasoning. Clear organisation improves coherence and makes the work easier to evaluate. Students should ensure that each paragraph contributes directly to the overall argument rather than adding loosely connected description.

@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''c:/Users/sahua/OneDrive/Desktop/ANSH/EduAIPlatform/llm-service/app/prompts.py''\\).read\\(\\)\\); print\\(''syntax OK''\\)\")",
+      "Bash(docker ps:*)"
+    ]
+  }
+}

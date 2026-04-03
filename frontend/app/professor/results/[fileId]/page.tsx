@@ -7,13 +7,13 @@ import {
   ArrowLeft,
   ClipboardList,
   RefreshCw,
-  ShieldAlert,
-  ShieldCheck,
   Sparkles,
   Timer,
 } from "lucide-react";
 import { backendUrl } from "@/lib/backendUrl";
-import { fetchJsonWithAuth } from "@/lib/fetchWithAuth";
+import { fetchJsonWithAuth, fetchWithAuth } from "@/lib/fetchWithAuth";
+import { buildRenderableRagMeta } from "@/lib/ragMeta";
+import RagEvidencePanel from "@/components/rag/RagEvidencePanel";
 
 type ProfessorLatestResp = {
   found?: boolean;
@@ -38,6 +38,42 @@ type ProfessorLatestResp = {
         needs_review?: boolean;
         reason?: string;
       };
+      rag_meta?: {
+        enabled?: boolean;
+        confidence_score?: number | null;
+        confidence_label?: string | null;
+        safe_review?: boolean | null;
+        citations?: Array<{
+          title: string;
+          section: string;
+          document_id: string;
+          chunk_id: string;
+          category?: string | null;
+          score?: number | null;
+        }> | null;
+        retrieved_chunks?: Array<{
+          chunk_id: string;
+          document_id: string;
+          document_title: string;
+          section: string;
+          category: string;
+          audience: "student" | "professor";
+          content: string;
+          score: number;
+          source_priority?: number;
+          is_official?: boolean;
+          metadata?: Record<string, any>;
+        }> | null;
+        trace?: {
+          audience?: string;
+          query?: string;
+          collection_name?: string;
+          rewritten_queries?: string[];
+          retrieved_chunk_ids?: string[];
+          final_chunk_ids?: string[];
+          scores?: number[];
+        } | null;
+      } | null;
     };
     model_versions?: {
       llm_model_used?: string;
@@ -56,7 +92,50 @@ type ProfessorLatestResp = {
       };
       request_id?: string;
     };
+    rag_trace?: {
+      audience?: string;
+      query?: string;
+      collection_name?: string;
+      rewritten_queries?: string[];
+      retrieved_chunk_ids?: string[];
+      final_chunk_ids?: string[];
+      scores?: number[];
+    } | null;
+    citations?: Array<{
+      title: string;
+      section: string;
+      document_id: string;
+      chunk_id: string;
+      category?: string | null;
+      score?: number | null;
+    }> | null;
+    retrieval_confidence?: number | null;
+    retrieval_confidence_label?: string | null;
+    safe_review?: boolean | null;
+    retrieved_chunks?: Array<{
+      chunk_id: string;
+      document_id: string;
+      document_title: string;
+      section: string;
+      category: string;
+      audience: "student" | "professor";
+      content: string;
+      score: number;
+      source_priority?: number;
+      is_official?: boolean;
+      metadata?: Record<string, any>;
+    }> | null;
   };
+};
+
+type LangChainMeta = {
+  role: string;
+  needs_review: boolean;
+  model_used: string;
+  fallback_used: boolean;
+  decision_source: string;
+  execution_mode: string;
+  discrepancy_flag?: boolean | null;
 };
 
 function fmtDate(iso?: string) {
@@ -91,6 +170,8 @@ export default function ProfessorReport({ params }: { params: { fileId: string }
   const [item, setItem] = useState<ProfessorLatestResp["item"] | null>(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
+  const [langchainGenerating, setLangchainGenerating] = useState(false);
+  const [langchainMeta, setLangchainMeta] = useState<LangChainMeta | null>(null);
 
   async function loadReport() {
     setErr(null);
@@ -106,6 +187,41 @@ export default function ProfessorReport({ params }: { params: { fileId: string }
       setErr(e?.message || "Failed to load report");
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function generateLangChain() {
+    if (!fileId || langchainGenerating) return;
+    setLangchainGenerating(true);
+    setErr(null);
+    try {
+      const res = await fetchWithAuth(
+        backendUrl(`/langchain/professor/generate`),
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ file_id: fileId }),
+        },
+        { timeoutMs: 600000 }
+      );
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        throw new Error(txt || `LangChain generate failed (${res.status})`);
+      }
+      const json = await res.json();
+      setLangchainMeta(json.meta || null);
+      setItem({
+        id: json.stored?.id || "",
+        file_id: fileId,
+        role: "professor",
+        created_at: json.stored?.created_at || undefined,
+        needs_review: json.meta?.needs_review || false,
+        report_json: json.report,
+      });
+    } catch (e: any) {
+      setErr(e?.message || "LangChain generate failed");
+    } finally {
+      setLangchainGenerating(false);
     }
   }
 
@@ -127,6 +243,8 @@ export default function ProfessorReport({ params }: { params: { fileId: string }
     const rows = report?.moderation_notes || [];
     return Array.isArray(rows) ? rows : [];
   }, [report]);
+
+  const ragMeta = useMemo(() => buildRenderableRagMeta(item), [item]);
 
   return (
     <div className="grid gap-6">
@@ -151,6 +269,14 @@ export default function ProfessorReport({ params }: { params: { fileId: string }
               {loading ? "Loading..." : "Refresh"}
             </button>
 
+            <button
+              onClick={() => void generateLangChain()}
+              disabled={langchainGenerating}
+              className="inline-flex items-center gap-2 rounded-2xl border border-violet-400/30 bg-violet-500/20 px-4 py-3 text-sm font-bold text-violet-100 transition hover:bg-violet-500/30 disabled:opacity-50"
+            >
+              <RefreshCw size={16} className={langchainGenerating ? "animate-spin" : ""} />
+              {langchainGenerating ? "Generating..." : "LangChain"}
+            </button>
             <Link
               href="/professor/queue"
               className="inline-flex items-center gap-2 rounded-2xl border border-white/10 bg-white/10 px-4 py-3 text-sm font-bold text-white transition hover:bg-white/15"
@@ -194,6 +320,12 @@ export default function ProfessorReport({ params }: { params: { fileId: string }
                 )}
                 <Badge tone="primary" text={`Confidence: ${pct(finalConfidence)}`} />
                 <Badge tone="neutral" text={`Band: ${confidenceBand(finalConfidence)}`} />
+                {langchainMeta?.discrepancy_flag ? (
+                  <Badge tone="bad" text="⚠ ML–LLM Disagreement" />
+                ) : null}
+                {langchainMeta?.execution_mode ? (
+                  <Badge tone="neutral" text={`Mode: ${langchainMeta.execution_mode}`} />
+                ) : null}
               </div>
             </div>
 
@@ -278,6 +410,12 @@ export default function ProfessorReport({ params }: { params: { fileId: string }
               </div>
             </section>
           </section>
+
+          <RagEvidencePanel
+            ragMeta={ragMeta}
+            title="Professor RAG Evidence"
+            emptyMessage="No RAG evidence was attached to this professor report. If you expected citations or snippets, the stored report currently has empty RAG fields."
+          />
 
           <section className="rounded-[30px] border border-white/10 bg-white/[0.05] p-5 shadow-[0_20px_70px_rgba(0,0,0,0.22)] backdrop-blur-xl">
             <h3 className="mb-4 text-lg font-black text-white">Raw JSON (Demo)</h3>

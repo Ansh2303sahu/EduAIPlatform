@@ -1,21 +1,30 @@
+from __future__ import annotations
+
 from importlib import import_module
+from typing import TYPE_CHECKING, cast
 
-try:
-    _pydantic_settings = import_module("pydantic_settings")
-    BaseSettings = _pydantic_settings.BaseSettings
-    SettingsConfigDict = _pydantic_settings.SettingsConfigDict
-except ModuleNotFoundError:
-    from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
-    class BaseSettings(BaseModel):
+if TYPE_CHECKING:
+    class _BaseSettings(BaseModel):
         pass
+else:
+    try:
+        _pydantic_settings = import_module("pydantic_settings")
+        _BaseSettings = _pydantic_settings.BaseSettings
+    except ModuleNotFoundError:
+        class _BaseSettings(BaseModel):
+            pass
 
-    def SettingsConfigDict(**kwargs):  # type: ignore[override]
-        return dict(**kwargs)
 
-
-class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+class Settings(_BaseSettings):
+    model_config: ConfigDict = cast(
+        ConfigDict,
+        {
+            "env_file": ".env",
+            "extra": "ignore",
+        },
+    )
 
     # shared secret used by backend -> ai-service calls
     ai_service_secret: str = "dev_ai_secret"

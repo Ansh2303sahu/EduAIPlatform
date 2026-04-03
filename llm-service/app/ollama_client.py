@@ -1,13 +1,14 @@
-import os
 import json
 import httpx
 from typing import Any, Dict, Mapping, Optional, Union
 
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://host.docker.internal:11434").rstrip("/")
-OLLAMA_TIMEOUT_S = float(os.getenv("OLLAMA_TIMEOUT_S", "180"))
-OLLAMA_PRIMARY_MODEL = os.getenv("OLLAMA_PRIMARY_MODEL", "mistral")
-OLLAMA_FALLBACK_MODEL = os.getenv("OLLAMA_FALLBACK_MODEL", "phi3")
-OLLAMA_OPTIONS_JSON = os.getenv("OLLAMA_OPTIONS_JSON", "").strip()
+from app.config import settings
+
+OLLAMA_URL = str(settings.ollama_base_url or "http://host.docker.internal:11434").rstrip("/")
+OLLAMA_TIMEOUT_S = float(settings.timeout_seconds or 180)
+OLLAMA_PRIMARY_MODEL = str(settings.primary_model or "gemma3:latest")
+OLLAMA_FALLBACK_MODEL = str(settings.fallback_model or "mistral:latest")
+OLLAMA_OPTIONS_JSON = str(settings.ollama_options_json or "").strip()
 
 
 def _err(e: Exception) -> str:
@@ -36,20 +37,40 @@ def _as_mapping_payload(payload: Union[Dict[str, Any], str, Mapping[str, Any]]) 
     raise TypeError(f"payload must be a dict/mapping or str, got {type(payload).__name__}: {payload!r}")
 
 
+_STABLE_OUTPUT_DEFAULTS: Dict[str, Any] = {
+    # Low temperature for deterministic structured output
+    "temperature": 0.1,
+    # Enough tokens for a full student/professor report
+    "num_predict": 4096,
+    # Controlled sampling — reduces hallucinated prose around JSON
+    "top_p": 0.9,
+    "top_k": 40,
+    # Mild repetition penalty to discourage trailing duplicate content
+    "repeat_penalty": 1.1,
+}
+
+
 def _apply_defaults(payload: Dict[str, Any]) -> Dict[str, Any]:
     payload.setdefault("stream", False)
+    payload.setdefault("format", "json")
+
+    # Start from stable structured-output defaults, let OLLAMA_OPTIONS_JSON override,
+    # then let the caller's own "options" key take final precedence.
+    merged_options: Dict[str, Any] = dict(_STABLE_OUTPUT_DEFAULTS)
 
     if OLLAMA_OPTIONS_JSON:
         try:
             opts = json.loads(OLLAMA_OPTIONS_JSON)
             if isinstance(opts, dict):
-                payload_options = payload.get("options") or {}
-                if not isinstance(payload_options, dict):
-                    payload_options = {}
-                payload["options"] = {**payload_options, **opts}
+                merged_options.update(opts)
         except Exception:
             pass
 
+    caller_options = payload.get("options") or {}
+    if isinstance(caller_options, dict):
+        merged_options.update(caller_options)
+
+    payload["options"] = merged_options
     return payload
 
 
@@ -99,3 +120,19 @@ async def generate_with_fallback(payload: Union[Dict[str, Any], str, Mapping[str
         e2 = e
 
     raise RuntimeError(f"ollama primary failed: {_err(e1)} | fallback failed: {_err(e2)}")
+
+
+async def generate_with_specific_model(
+    model: str,
+    payload: Union[Dict[str, Any], str, Mapping[str, Any]],
+) -> Dict[str, Any]:
+    """Call a specific named model without any primary/fallback logic.
+
+    Used for JSON-repair retries where we want to explicitly route to the
+    fallback model (mistral:latest) after the primary model (gemma3:latest)
+    returned unparseable output.  A JSON-parse failure is counted as a model
+    failure here, so we should not retry the same model.
+    """
+    base = _apply_defaults(_as_mapping_payload(payload))
+    raw = await ollama_generate_json({**base, "model": model})
+    return _normalize_result(raw, model)

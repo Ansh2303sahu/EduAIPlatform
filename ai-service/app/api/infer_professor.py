@@ -11,12 +11,12 @@ from fastapi import APIRouter, BackgroundTasks, Depends, Header
 from pydantic import BaseModel, Field
 from transformers import DistilBertTokenizerFast
 
-from app.core.security import Roles, require_role, require_service_secret
-from app.core.rate_limit import enforce_rate_limit
-from app.services.audit_log import audit_log
-from app.registry.model_registry import get_model_path, load_registered_model
-from app.registry.filesystem_store import load_metadata, model_dir
-from app.registry.loader import load_onnx_session
+from ..core.security import Roles, require_role, require_service_secret
+from ..core.rate_limit import enforce_rate_limit
+from ..services.audit_log import audit_log
+from ..registry.model_registry import get_model_path, load_registered_model
+from ..registry.filesystem_store import load_metadata, model_dir
+from ..registry.loader import load_onnx_session
 
 router = APIRouter(prefix="/infer/professor", tags=["infer-professor"])
 

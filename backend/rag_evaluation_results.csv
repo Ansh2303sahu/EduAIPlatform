@@ -1,0 +1,13 @@
+role,query,expected_topic,top_result_category,retrieved_correct,confidence_score,confidence_label,safe_review,top_document
+student,citation help,referencing,referencing,yes,0.86,high,false,In Text Citation Rules
+student,essay structure,writing,writing,yes,0.83,high,false,Essay Structure
+student,paragraph development,writing,writing,yes,0.93,high,false,Paragraph Development
+student,critical analysis,critical_thinking,critical_thinking,yes,0.68,medium,false,Critical Analysis
+student,avoid plagiarism,academic_integrity,academic_integrity,yes,0.79,high,false,Plagiarism Guidance
+professor,rubric guidance,rubrics,rubrics,yes,0.77,high,false,Rubric Alignment
+professor,actionable feedback,feedback_templates,feedback_templates,yes,0.98,high,false,Actionable Feedback
+professor,marking consistency,marking_policy,marking_policy,yes,1.0,high,false,Marking Consistency
+professor,moderation notes,moderation,moderation,yes,1.0,high,false,Moderation Notes
+professor,high quality writing,academic_quality,academic_quality,yes,0.8,high,false,High Quality Writing
+student,football scores tonight,out_of_scope,writing,yes,0.43,low,true,Essay Structure
+professor,astrophysics derivation,out_of_scope,rubrics,no,0.51,medium,false,High Distinction Descriptors

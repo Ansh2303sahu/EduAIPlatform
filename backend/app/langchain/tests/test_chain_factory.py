@@ -1,0 +1,97 @@
+"""
+Tests for the Phase 10 LangChain chain factory.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+import pytest
+
+from app.langchain.config import phase10_settings
+from app.langchain.services.chain_factory import (
+    build_chain_execution_config,
+    build_generation_chain,
+    build_professor_model,
+    build_student_model,
+)
+
+
+class _FakeResponse:
+    def __init__(self, payload: dict[str, Any], *, status_code: int = 200, headers: dict[str, str] | None = None):
+        self._payload = payload
+        self.status_code = status_code
+        self.headers = headers or {}
+        self.text = str(payload)
+
+    def json(self) -> dict[str, Any]:
+        return self._payload
+
+
+class _FakeAsyncClient:
+    def __init__(self, sink: dict[str, Any], *args: Any, **kwargs: Any) -> None:
+        sink["init_kwargs"] = kwargs
+        self._sink = sink
+
+    async def __aenter__(self) -> "_FakeAsyncClient":
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        return None
+
+    async def post(self, url: str, *, json: dict[str, Any], headers: dict[str, str]) -> _FakeResponse:
+        self._sink["url"] = url
+        self._sink["json"] = json
+        self._sink["headers"] = headers
+        return _FakeResponse(
+            {"response": "{\"ok\":true}", "model_used": json.get("requested_model", "")},
+            headers={"x-llm-model-used": json.get("requested_model", "")},
+        )
+
+
+@pytest.mark.asyncio
+async def test_student_generation_chain_uses_llm_service_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
+    sink: dict[str, Any] = {}
+
+    monkeypatch.setattr("app.langchain.services.chain_factory.settings.llm_service_secret", "test-secret")
+    monkeypatch.setattr(
+        "app.langchain.services.chain_factory.httpx.AsyncClient",
+        lambda *args, **kwargs: _FakeAsyncClient(sink, *args, **kwargs),
+    )
+
+    chain = build_generation_chain(build_student_model())
+    result = await chain.ainvoke({"prompt_text": "student prompt"})
+
+    assert result == '{"ok":true}'
+    assert sink["url"].endswith("/llm/generate")
+    assert sink["json"]["role"] == "student"
+    assert sink["json"]["temperature"] == phase10_settings.student_temperature
+    assert sink["json"]["requested_model"] == phase10_settings.primary_model
+    assert sink["headers"]["x-ai-secret"]
+
+
+@pytest.mark.asyncio
+async def test_professor_generation_chain_applies_professor_temperature(monkeypatch: pytest.MonkeyPatch) -> None:
+    sink: dict[str, Any] = {}
+
+    monkeypatch.setattr("app.langchain.services.chain_factory.settings.llm_service_secret", "test-secret")
+    monkeypatch.setattr(
+        "app.langchain.services.chain_factory.httpx.AsyncClient",
+        lambda *args, **kwargs: _FakeAsyncClient(sink, *args, **kwargs),
+    )
+
+    chain = build_generation_chain(build_professor_model(primary=False))
+    await chain.ainvoke({"prompt_text": "professor prompt"})
+
+    assert sink["json"]["role"] == "professor"
+    assert sink["json"]["temperature"] == phase10_settings.professor_temperature
+    assert sink["json"]["requested_model"] == phase10_settings.fallback_model
+
+
+def test_build_chain_execution_config_includes_versions() -> None:
+    config = build_chain_execution_config(role="student")
+
+    assert config["metadata"]["role"] == "student"
+    assert config["metadata"]["chain_version"] == phase10_settings.chain_version
+    assert config["metadata"]["schema_version"] == phase10_settings.schema_version
+    assert config["metadata"]["prompt_version"] == phase10_settings.student_prompt_version

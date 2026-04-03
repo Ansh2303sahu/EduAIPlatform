@@ -1,14 +1,19 @@
 # backend/app/api/files.py
 import hashlib
 import logging
+import mimetypes
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, List
 
 import httpx
-import magic
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
+
+try:
+    import magic  # type: ignore[import-not-found]
+except ImportError:  # pragma: no cover - depends on native libmagic availability
+    magic = None
 
 from app.core.config import settings
 from app.core.deps import CurrentUser, get_current_user
@@ -198,7 +203,17 @@ def _is_allowed(sniffed_mime: str, filename: str) -> bool:
 
 
 def _sniff_mime(buf: bytes, filename: str) -> str:
-    sniffed = (magic.from_buffer(buf[:4096], mime=True) or "").lower().strip()
+    sniffed = ""
+    if magic is not None:
+        try:
+            sniffed = (magic.from_buffer(buf[:4096], mime=True) or "").lower().strip()
+        except Exception:
+            sniffed = ""
+
+    if not sniffed:
+        guessed, _ = mimetypes.guess_type(filename or "")
+        sniffed = (guessed or "").lower().strip()
+
     f = (filename or "").lower()
 
     if f.endswith(".csv") and sniffed in {"text/plain", ""}:

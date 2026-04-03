@@ -14,11 +14,11 @@ import {
   RefreshCw,
   ShieldAlert,
   Table2,
-  Video,
-  Wand2,
 } from "lucide-react";
 import { backendUrl } from "@/lib/backendUrl";
 import { fetchWithAuth } from "@/lib/fetchWithAuth";
+import { buildRenderableRagMeta } from "@/lib/ragMeta";
+import RagEvidencePanel from "@/components/rag/RagEvidencePanel";
 
 type ResultsResp = {
   file: {
@@ -56,6 +56,47 @@ type ResultsResp = {
   events?: Array<{ event_type: string; created_at?: string }>;
 };
 
+type ReportIssue =
+  | string
+  | {
+      title?: string;
+      issue?: string;
+      label?: string;
+      text?: string;
+      evidence?: string;
+      details?: string;
+      description?: string;
+      severity?: string;
+      level?: string;
+    };
+
+type ReportPlanItem =
+  | string
+  | {
+      action?: string;
+      item?: string;
+      step?: string;
+      title?: string;
+      text?: string;
+      why?: string;
+      reason?: string;
+      how?: string;
+      details?: string;
+      priority?: number;
+    };
+
+type ReportChecklistItem =
+  | string
+  | {
+      item?: string;
+      label?: string;
+      title?: string;
+      text?: string;
+      done?: boolean;
+      checked?: boolean;
+      complete?: boolean;
+    };
+
 type Phase7LatestResp = {
   found: boolean;
   item?: {
@@ -66,11 +107,47 @@ type Phase7LatestResp = {
     needs_review?: boolean;
     report_json?: {
       summary?: string;
-      issues?: Array<{ title: string; evidence?: string; severity?: string }>;
-      improvement_plan?: Array<{ action: string; why?: string; how?: string; priority?: number }>;
-      checklist?: Array<{ item: string; done?: boolean }>;
+      issues?: ReportIssue[];
+      improvement_plan?: ReportPlanItem[];
+      checklist?: ReportChecklistItem[];
       model_agreement?: { ml_confidence?: number; llm_confidence?: number; final_confidence?: number };
       safety?: { needs_review?: boolean; reason?: string };
+      rag_meta?: {
+        enabled?: boolean;
+        confidence_score?: number | null;
+        confidence_label?: string | null;
+        safe_review?: boolean | null;
+        citations?: Array<{
+          title: string;
+          section: string;
+          document_id: string;
+          chunk_id: string;
+          category?: string | null;
+          score?: number | null;
+        }> | null;
+        retrieved_chunks?: Array<{
+          chunk_id: string;
+          document_id: string;
+          document_title: string;
+          section: string;
+          category: string;
+          audience: "student" | "professor";
+          content: string;
+          score: number;
+          source_priority?: number;
+          is_official?: boolean;
+          metadata?: Record<string, any>;
+        }> | null;
+        trace?: {
+          audience?: string;
+          query?: string;
+          collection_name?: string;
+          rewritten_queries?: string[];
+          retrieved_chunk_ids?: string[];
+          final_chunk_ids?: string[];
+          scores?: number[];
+        } | null;
+      } | null;
     };
     model_versions?: {
       llm_model_used?: string;
@@ -81,8 +158,247 @@ type Phase7LatestResp = {
       ml_models?: { feedback?: string; confidence?: string };
       request_id?: string;
     };
+    rag_trace?: {
+      audience?: string;
+      query?: string;
+      collection_name?: string;
+      rewritten_queries?: string[];
+      retrieved_chunk_ids?: string[];
+      final_chunk_ids?: string[];
+      scores?: number[];
+    } | null;
+    citations?: Array<{
+      title: string;
+      section: string;
+      document_id: string;
+      chunk_id: string;
+      category?: string | null;
+      score?: number | null;
+    }> | null;
+    retrieval_confidence?: number | null;
+    retrieval_confidence_label?: string | null;
+    safe_review?: boolean | null;
+    retrieved_chunks?: Array<{
+      chunk_id: string;
+      document_id: string;
+      document_title: string;
+      section: string;
+      category: string;
+      audience: "student" | "professor";
+      content: string;
+      score: number;
+      source_priority?: number;
+      is_official?: boolean;
+      metadata?: Record<string, any>;
+    }> | null;
   };
 };
+
+type LangChainMeta = {
+  role: string;
+  needs_review: boolean;
+  model_used: string;
+  fallback_used: boolean;
+  decision_source: string;
+  execution_mode: string;
+  discrepancy_flag?: boolean | null;
+};
+
+type NormalizedIssue = {
+  title: string;
+  evidence?: string;
+  severity?: string;
+};
+
+type NormalizedPlanItem = {
+  action: string;
+  why?: string;
+  how?: string;
+  priority?: number;
+};
+
+type NormalizedChecklistItem = {
+  item: string;
+  done?: boolean;
+};
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function asArray(value: unknown): unknown[] {
+  if (Array.isArray(value)) return value;
+  if (value == null) return [];
+
+  const record = asRecord(value);
+  if (record) {
+    for (const key of ["items", "data", "values", "results"]) {
+      if (Array.isArray(record[key])) return record[key] as unknown[];
+    }
+  }
+
+  return [value];
+}
+
+function extractText(value: unknown): string | undefined {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed || undefined;
+  }
+
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return String(value);
+  }
+
+  if (Array.isArray(value)) {
+    const parts = value.map((item) => extractText(item)).filter(Boolean) as string[];
+    return parts.length ? parts.join(" ") : undefined;
+  }
+
+  const record = asRecord(value);
+  if (!record) return undefined;
+
+  return firstNonEmptyText(
+    record.text,
+    record.title,
+    record.label,
+    record.item,
+    record.action,
+    record.issue,
+    record.evidence,
+    record.details,
+    record.description,
+    record.reason,
+    record.how,
+    record.content,
+    record.message,
+    record.value,
+  );
+}
+
+function firstNonEmptyText(...values: unknown[]) {
+  for (const value of values) {
+    const text = extractText(value);
+    if (text) return text;
+  }
+  return undefined;
+}
+
+function normalizeSeverity(value: unknown): string | undefined {
+  const raw = extractText(value)?.toLowerCase();
+  if (!raw) return undefined;
+  if (raw.includes("high")) return "high";
+  if (raw.includes("med")) return "med";
+  if (raw.includes("low")) return "low";
+  return raw;
+}
+
+function normalizePriority(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.max(1, Math.round(value));
+  }
+
+  if (typeof value === "string") {
+    const parsed = Number.parseInt(value.trim(), 10);
+    if (Number.isFinite(parsed)) return Math.max(1, parsed);
+  }
+
+  return undefined;
+}
+
+function normalizeDone(value: unknown): boolean | undefined {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+  if (typeof value !== "string") return undefined;
+
+  const raw = value.trim().toLowerCase();
+  if (["true", "yes", "done", "checked", "complete", "completed"].includes(raw)) return true;
+  if (["false", "no", "pending", "unchecked", "incomplete"].includes(raw)) return false;
+  return undefined;
+}
+
+function normalizeIssues(items?: ReportIssue[] | null): NormalizedIssue[] {
+  return (items || [])
+    .map((item) => {
+      if (typeof item === "string") {
+        const title = item.trim();
+        return title ? { title } : null;
+      }
+      if (!item || typeof item !== "object") return null;
+
+      const title = firstNonEmptyText(item.title, item.issue, item.label, item.text);
+      const evidence = firstNonEmptyText(item.evidence, item.details, item.description);
+      const severity = firstNonEmptyText(item.severity, item.level);
+
+      if (!title && !evidence && !severity) return null;
+
+      return {
+        title: title || "Unnamed issue",
+        evidence,
+        severity,
+      };
+    })
+    .filter(Boolean) as NormalizedIssue[];
+}
+
+function normalizeImprovementPlan(items?: ReportPlanItem[] | null): NormalizedPlanItem[] {
+  return asArray(items)
+    .map((item, idx) => {
+      if (typeof item === "string") {
+        const action = item.trim();
+        return action ? { action } : null;
+      }
+      const record = asRecord(item);
+      if (!record) return null;
+
+      const action = firstNonEmptyText(
+        record.action,
+        record.item,
+        record.step,
+        record.title,
+        record.text,
+        record.message,
+      );
+      const why = firstNonEmptyText(record.why, record.reason, record.because);
+      const how = firstNonEmptyText(record.how, record.details, record.description);
+      const priority = normalizePriority(record.priority) ?? idx + 1;
+
+      return action || why || how
+        ? { action: action || "Suggested improvement", why, how, priority }
+        : null;
+    })
+    .filter(Boolean) as NormalizedPlanItem[];
+}
+
+function normalizeChecklist(items?: ReportChecklistItem[] | null): NormalizedChecklistItem[] {
+  return asArray(items)
+    .map((item) => {
+      if (typeof item === "string") {
+        const text = item.trim();
+        return text ? { item: text } : null;
+      }
+      const record = asRecord(item);
+      if (!record) return null;
+
+      const text = firstNonEmptyText(
+        record.item,
+        record.label,
+        record.title,
+        record.text,
+        record.message,
+      );
+      const done =
+        normalizeDone(record.done) ??
+        normalizeDone(record.checked) ??
+        normalizeDone(record.complete) ??
+        normalizeDone(record.status);
+
+      return text ? { item: text, done } : null;
+    })
+    .filter(Boolean) as NormalizedChecklistItem[];
+}
 
 function confidenceBandFrom(finalConfidence?: number) {
   if (typeof finalConfidence !== "number") return "—";
@@ -259,6 +575,9 @@ export default function ResultsPage() {
   const [latest, setLatest] = useState<Phase7LatestResp | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [reanalyzing, setReanalyzing] = useState(false);
+  const [langchainGenerating, setLangchainGenerating] = useState(false);
+  const [langchainMeta, setLangchainMeta] = useState<LangChainMeta | null>(null);
 
   const inflightRef = useRef(false);
 
@@ -293,6 +612,76 @@ export default function ResultsPage() {
     } finally {
       setLoading(false);
       inflightRef.current = false;
+    }
+  }
+
+  async function reanalyze() {
+    if (!fileId || reanalyzing) return;
+    setReanalyzing(true);
+    setError(null);
+    try {
+      // 10-minute timeout — LLM generation can take several minutes
+      const res = await fetchWithAuth(
+        backendUrl(`/phase7/student/generate`),
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ file_id: fileId, force: true }),
+        },
+        { timeoutMs: 600000 }
+      );
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        throw new Error(txt || `Re-analyze failed (${res.status})`);
+      }
+      const json = await res.json();
+      if (json?.stored?.report_json) {
+        setLatest({ found: true, item: json.stored });
+      } else {
+        await loadAll();
+      }
+    } catch (e: any) {
+      setError(e?.message || "Re-analyze failed");
+    } finally {
+      setReanalyzing(false);
+    }
+  }
+
+  async function generateLangChain() {
+    if (!fileId || langchainGenerating) return;
+    setLangchainGenerating(true);
+    setError(null);
+    try {
+      const res = await fetchWithAuth(
+        backendUrl(`/langchain/student/generate`),
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ file_id: fileId }),
+        },
+        { timeoutMs: 600000 }
+      );
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        throw new Error(txt || `LangChain generate failed (${res.status})`);
+      }
+      const json = await res.json();
+      setLangchainMeta(json.meta || null);
+      setLatest({
+        found: true,
+        item: {
+          id: json.stored?.id || "",
+          file_id: fileId,
+          role: "student",
+          created_at: json.stored?.created_at || undefined,
+          needs_review: json.meta?.needs_review || false,
+          report_json: json.report,
+        },
+      });
+    } catch (e: any) {
+      setError(e?.message || "LangChain generate failed");
+    } finally {
+      setLangchainGenerating(false);
     }
   }
 
@@ -337,11 +726,43 @@ export default function ResultsPage() {
       ? Math.max(0, Math.min(1, mlBucket / 4))
       : report?.model_agreement?.ml_confidence;
 
-  const llmConf =
-    typeof finalConf === "number" ? finalConf : report?.model_agreement?.llm_confidence;
+  const llmConf = report?.model_agreement?.llm_confidence;
+  const llmMode = latest?.item?.model_versions?.llm_model_used;
+  const isSafeMode = llmMode === "safe_mode";
 
   const band = confidenceBandFrom(finalConf);
   const needsReview = !!(latest?.item?.needs_review || report?.safety?.needs_review);
+  const normalizedReport = useMemo(() => {
+    const safeReport = report || {};
+
+    const issues = normalizeIssues(safeReport.issues);
+    const improvementPlan = normalizeImprovementPlan(safeReport.improvement_plan);
+    const checklist = normalizeChecklist(safeReport.checklist);
+
+    return {
+      summary:
+        typeof safeReport.summary === "string" && safeReport.summary.trim()
+          ? safeReport.summary.trim()
+          : "No summary available.",
+      issues,
+      improvementPlan,
+      checklist,
+    };
+  }, [report]);
+  const issueItems = normalizedReport.issues;
+  const improvementItems = normalizedReport.improvementPlan;
+  const checklistItems = normalizedReport.checklist;
+  const hasRenderableReport =
+    !!report &&
+    Object.keys(report).length > 0 &&
+    (
+      !!normalizedReport.summary ||
+      normalizedReport.issues.length > 0 ||
+      normalizedReport.improvementPlan.length > 0 ||
+      normalizedReport.checklist.length > 0
+    );
+
+  const ragMeta = useMemo(() => buildRenderableRagMeta(latest?.item), [latest?.item]);
 
   if (!fileId) {
     return <div className="p-6 text-white">Missing file ID</div>;
@@ -375,6 +796,17 @@ export default function ResultsPage() {
                       Needs review
                     </span>
                   ) : null}
+                  {langchainMeta?.discrepancy_flag ? (
+                    <span className="inline-flex items-center gap-2 rounded-full border border-orange-300/20 bg-orange-400/10 px-3 py-1 text-xs font-bold text-orange-200">
+                      <AlertTriangle size={14} />
+                      ML–LLM Disagreement
+                    </span>
+                  ) : null}
+                  {langchainMeta?.execution_mode ? (
+                    <span className="inline-flex rounded-full border border-violet-300/20 bg-violet-500/10 px-3 py-1 text-xs font-bold text-violet-200">
+                      Mode: {langchainMeta.execution_mode}
+                    </span>
+                  ) : null}
                 </div>
               </div>
 
@@ -392,6 +824,22 @@ export default function ResultsPage() {
                 >
                   <RefreshCw size={16} className={loading ? "animate-spin" : ""} />
                   {loading ? "Loading..." : "Refresh"}
+                </button>
+                <button
+                  onClick={() => void reanalyze()}
+                  disabled={reanalyzing}
+                  className="inline-flex items-center gap-2 rounded-2xl border border-blue-400/30 bg-blue-500/20 px-4 py-3 text-sm font-bold text-blue-100 transition hover:bg-blue-500/30 disabled:opacity-50"
+                >
+                  <RefreshCw size={16} className={reanalyzing ? "animate-spin" : ""} />
+                  {reanalyzing ? "Re-analyzing..." : "Re-analyze"}
+                </button>
+                <button
+                  onClick={() => void generateLangChain()}
+                  disabled={langchainGenerating}
+                  className="inline-flex items-center gap-2 rounded-2xl border border-violet-400/30 bg-violet-500/20 px-4 py-3 text-sm font-bold text-violet-100 transition hover:bg-violet-500/30 disabled:opacity-50"
+                >
+                  <RefreshCw size={16} className={langchainGenerating ? "animate-spin" : ""} />
+                  {langchainGenerating ? "Generating..." : "LangChain"}
                 </button>
               </div>
             </div>
@@ -428,8 +876,8 @@ export default function ResultsPage() {
                 <MutedBox text="Loading AI feedback..." />
               ) : !latest.found ? (
                 <MutedBox text="No AI report stored yet. If ingestion is complete, the report should appear shortly." />
-              ) : !report ? (
-                <MutedBox text="Report found, but report_json is missing." />
+              ) : !hasRenderableReport ? (
+                <MutedBox text="AI report is being prepared..." />
               ) : (
                 <div className="grid gap-5">
                   <div className="grid gap-4 md:grid-cols-3">
@@ -440,22 +888,28 @@ export default function ResultsPage() {
                       <ConfidenceMeter value={mlConf} />
                     </MetricCard>
                     <MetricCard title="LLM">
-                      <ConfidenceMeter value={llmConf} />
+                      {typeof llmConf === "number" ? (
+                        <ConfidenceMeter value={llmConf} />
+                      ) : (
+                        <div className="text-sm leading-6 text-slate-400">
+                          {isSafeMode ? "Unavailable in safe mode." : "LLM confidence unavailable."}
+                        </div>
+                      )}
                     </MetricCard>
                   </div>
 
                   <ContentCard title="Summary">
                     <div className="whitespace-pre-wrap text-sm leading-7 text-slate-300">
-                      {report.summary || "—"}
+                      {normalizedReport.summary}
                     </div>
                   </ContentCard>
 
                   <ContentCard title="Issues">
-                    {(report.issues || []).length === 0 ? (
+                    {issueItems.length === 0 ? (
                       <MutedText text="No issues listed." />
                     ) : (
                       <div className="grid gap-3">
-                        {report.issues.map((it, idx) => (
+                        {issueItems.map((it, idx) => (
                           <div key={idx} className="rounded-[22px] border border-white/10 bg-white/[0.04] p-4">
                             <div className="flex flex-wrap items-center justify-between gap-3">
                               <strong className="text-white">{it.title}</strong>
@@ -473,11 +927,11 @@ export default function ResultsPage() {
                   </ContentCard>
 
                   <ContentCard title="Improvement plan">
-                    {(report.improvement_plan || []).length === 0 ? (
+                    {improvementItems.length === 0 ? (
                       <MutedText text="No improvement steps." />
                     ) : (
                       <ol className="grid gap-4 pl-5">
-                        {report.improvement_plan.slice(0, 10).map((p, idx) => (
+                        {improvementItems.slice(0, 10).map((p, idx) => (
                           <li key={idx} className="text-sm text-slate-300">
                             <div className="font-bold text-white">
                               {p.action}
@@ -494,11 +948,11 @@ export default function ResultsPage() {
                   </ContentCard>
 
                   <ContentCard title="Checklist">
-                    {(report.checklist || []).length === 0 ? (
+                    {checklistItems.length === 0 ? (
                       <MutedText text="No checklist items." />
                     ) : (
                       <div className="grid gap-3">
-                        {report.checklist.map((c, idx) => (
+                        {checklistItems.map((c, idx) => (
                           <label
                             key={idx}
                             className="flex items-center gap-3 rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-3 text-sm text-slate-300"
@@ -510,6 +964,12 @@ export default function ResultsPage() {
                       </div>
                     )}
                   </ContentCard>
+
+                  <RagEvidencePanel
+                    ragMeta={ragMeta}
+                    title="Student RAG Evidence"
+                    emptyMessage="No RAG evidence was attached to this student report. If you expected citations or snippets, the stored report currently has empty RAG fields."
+                  />
                 </div>
               )}
             </section>
@@ -517,20 +977,33 @@ export default function ResultsPage() {
             <section className="grid gap-6">
               <ContentCard title="Model + timing">
                 <div className="grid gap-3 text-sm text-slate-300">
-                  <div>
-                    LLM used:{" "}
-                    <b className="text-white">
-                      {latest?.item?.model_versions?.llm_model_used ||
-                        latest?.item?.model_versions?.llm_primary ||
-                        "—"}
-                    </b>
-                    {latest?.item?.model_versions?.llm_fallback ? (
-                      <span className="text-slate-400">
-                        {" "}
-                        (fallback: {latest.item.model_versions.llm_fallback})
-                      </span>
-                    ) : null}
-                  </div>
+                  {isSafeMode ? (
+                    <>
+                      <div>
+                        LLM mode: <b className="text-white">Safe mode</b>
+                      </div>
+                      {latest?.item?.model_versions?.llm_fallback ? (
+                        <div>
+                          Fallback model: <b className="text-white">{latest.item.model_versions.llm_fallback}</b>
+                        </div>
+                      ) : null}
+                    </>
+                  ) : (
+                    <div>
+                      LLM used:{" "}
+                      <b className="text-white">
+                        {latest?.item?.model_versions?.llm_model_used ||
+                          latest?.item?.model_versions?.llm_primary ||
+                          "—"}
+                      </b>
+                      {latest?.item?.model_versions?.llm_fallback ? (
+                        <span className="text-slate-400">
+                          {" "}
+                          (fallback: {latest.item.model_versions.llm_fallback})
+                        </span>
+                      ) : null}
+                    </div>
+                  )}
 
                   <div>
                     Timings: total <b className="text-white">{msToSec(latest?.item?.model_versions?.timings_ms?.total)}</b>, ingestion{" "}

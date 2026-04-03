@@ -19,6 +19,18 @@ from app.api.phase7 import router as phase7_router
 from app.api.admin import router as admin_router
 
 from app.api.progress import router as progress_router
+from app.api.rag_admin import router as rag_admin_router
+from app.api.rag_retrieve import router as rag_retrieve_router
+from app.api.llm_reports import router as llm_reports_router
+from app.langchain.config import phase10_settings
+from app.langchain.routers.student import (
+    legacy_router as phase10_student_router,
+    router as langchain_student_router,
+)
+from app.langchain.routers.professor import (
+    legacy_router as phase10_professor_router,
+    router as langchain_professor_router,
+)
 # main.py includes this with prefix="/api"
 api_router = APIRouter()
 router = APIRouter(prefix="/prof", tags=["prof-results"])
@@ -236,4 +248,11 @@ api_router.include_router(media_router)
 api_router.include_router(phase7_router)
 api_router.include_router(progress_router)
 api_router.include_router(admin_router)
-router.get("/results/{file_id}")
+api_router.include_router(rag_admin_router)
+api_router.include_router(rag_retrieve_router)
+api_router.include_router(llm_reports_router)
+if phase10_settings.enabled:
+    api_router.include_router(langchain_student_router)
+    api_router.include_router(langchain_professor_router)
+    api_router.include_router(phase10_student_router)
+    api_router.include_router(phase10_professor_router)

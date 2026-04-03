@@ -1,10 +1,48 @@
 from __future__ import annotations
-import json
-from pathlib import Path
-from typing import Dict
 
-BASE_MODELS_DIR = Path("models")
-MODELS_ROOT = Path("/app/models")
+import json
+import os
+from pathlib import Path
+from typing import Any, Dict
+
+
+def _looks_like_models_root(path: Path) -> bool:
+    if not path.exists() or not path.is_dir():
+        return False
+    if any((path / role).exists() for role in ("student", "professor", "similarity")):
+        return True
+    return any(path.glob("*/*/*/metadata.json"))
+
+
+def resolve_models_root() -> Path:
+    env_root = os.getenv("MODELS_DIR", "").strip()
+    repo_default = Path(__file__).resolve().parents[1] / "models"
+    candidates: list[Path] = []
+
+    if env_root:
+        candidates.append(Path(env_root))
+
+    candidates.extend(
+        [
+            repo_default,
+            Path("/app/app/models"),
+            Path("/app/models"),
+            Path("models"),
+        ]
+    )
+
+    for candidate in candidates:
+        if _looks_like_models_root(candidate):
+            return candidate
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+
+    return candidates[0]
+
+
+MODELS_ROOT = resolve_models_root()
 
 def ensure_model_dir(*, role: str, model_name: str, version: str) -> Path:
     """
@@ -37,6 +75,6 @@ def load_metadata(model_dir: Path) -> Dict[str, Any]:
     Reads metadata.json from the model directory.
     """
     p = model_dir / "metadata.json"
-    return json.loads(p.read_text())
+    return json.loads(p.read_text(encoding="utf-8"))
 
 
