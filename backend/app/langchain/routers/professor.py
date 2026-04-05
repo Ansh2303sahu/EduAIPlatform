@@ -201,9 +201,15 @@ def _public_meta_from_result(role: str, result: Mapping[str, Any]) -> LangChainR
     )
 
 
+def _normalize_citations(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
 def _public_rag_meta(rag_meta: Mapping[str, Any] | None) -> LangChainRagMeta:
     rag = dict(rag_meta or {})
-    citations = rag.get("citations") if isinstance(rag.get("citations"), list) else []
+    citations = _normalize_citations(rag.get("citations"))
     chunk_count = rag.get("chunk_count")
     if not isinstance(chunk_count, int):
         retrieved = rag.get("retrieved_chunks")
@@ -222,7 +228,7 @@ def _public_rag_meta(rag_meta: Mapping[str, Any] | None) -> LangChainRagMeta:
 
 def _public_rag_meta_from_row(row: Mapping[str, Any]) -> LangChainRagMeta:
     retrieved_chunks = row.get("retrieved_chunks")
-    citations = row.get("citations") if isinstance(row.get("citations"), list) else []
+    citations = _normalize_citations(row.get("citations"))
     confidence_label = str(row.get("retrieval_confidence_label") or "low")
     safe_review = bool(row.get("safe_review", False))
     chunk_count = len(retrieved_chunks) if isinstance(retrieved_chunks, list) else 0
