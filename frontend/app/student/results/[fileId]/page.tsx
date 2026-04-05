@@ -10,6 +10,7 @@ import {
   Clock3,
   FileText,
   ImageIcon,
+  Info,
   Mic,
   RefreshCw,
   ShieldAlert,
@@ -110,6 +111,7 @@ type Phase7LatestResp = {
       issues?: ReportIssue[];
       improvement_plan?: ReportPlanItem[];
       checklist?: ReportChecklistItem[];
+      confidence?: { mode?: string; overall?: number };
       model_agreement?: { ml_confidence?: number; llm_confidence?: number; final_confidence?: number };
       safety?: { needs_review?: boolean; reason?: string };
       rag_meta?: {
@@ -191,6 +193,10 @@ type Phase7LatestResp = {
       is_official?: boolean;
       metadata?: Record<string, any>;
     }> | null;
+  };
+  selection_metadata?: {
+    preferred_non_degraded?: boolean;
+    total_reports_considered?: number;
   };
 };
 
@@ -732,6 +738,33 @@ export default function ResultsPage() {
 
   const band = confidenceBandFrom(finalConf);
   const needsReview = !!(latest?.item?.needs_review || report?.safety?.needs_review);
+  const reportSafetyReason = typeof report?.safety?.reason === "string"
+    ? report.safety.reason.trim().toLowerCase()
+    : "";
+  const isLowContentQuality = reportSafetyReason === "low_content_quality";
+  const isDegradedReport = isLowContentQuality || needsReview;
+  const reportStatusLabel = isDegradedReport ? "Degraded" : "Valid";
+  const reportQualityBannerText = isDegradedReport
+    ? "⚠️ Low-confidence AI report — review recommended"
+    : "✅ AI-generated report (validated)";
+  const reportModelUsed =
+    latest?.item?.model_versions?.llm_model_used ||
+    latest?.item?.model_versions?.llm_primary;
+  const reportFallbackModel =
+    latest?.item?.model_versions?.llm_fallback &&
+    latest.item.model_versions.llm_fallback !== reportModelUsed
+      ? latest.item.model_versions.llm_fallback
+      : undefined;
+  const reportConfidenceOverall =
+    typeof report?.confidence?.overall === "number"
+      ? report.confidence.overall
+      : finalConf;
+  const selectionMeta = latest?.selection_metadata;
+  const preferredNonDegraded = !!selectionMeta?.preferred_non_degraded;
+  const totalReportsConsidered =
+    typeof selectionMeta?.total_reports_considered === "number"
+      ? selectionMeta.total_reports_considered
+      : undefined;
   const normalizedReport = useMemo(() => {
     const safeReport = report || {};
 
@@ -858,8 +891,22 @@ export default function ResultsPage() {
                   <h2 className="text-xl font-black">AI Feedback</h2>
                   <div className="mt-1 text-sm text-slate-400">
                     {!latest ? "Loading..." : latest.found ? "Stored report available" : "Not stored yet"}
-                    {latest?.item?.created_at ? ` • ${fmtDate(latest.item.created_at)}` : ""}
+                    {latest?.item?.created_at ? ` • Generated at: ${fmtDate(latest.item.created_at)}` : ""}
                   </div>
+                  {latest?.found && report ? (
+                    <div className="mt-2 text-sm text-slate-300">
+                      Generated using <b className="text-white">{reportModelUsed || "—"}</b>
+                      {" • "}
+                      Confidence: <b className="text-white">{pct(reportConfidenceOverall)}</b>
+                      {" • "}
+                      Status: <b className={isDegradedReport ? "text-amber-200" : "text-emerald-200"}>{reportStatusLabel}</b>
+                    </div>
+                  ) : null}
+                  {preferredNonDegraded ? (
+                    <div className="mt-2 text-xs text-amber-200/90">
+                      Showing the newest non-degraded stored report{typeof totalReportsConsidered === "number" ? ` from ${totalReportsConsidered} reports` : ""}.
+                    </div>
+                  ) : null}
                 </div>
 
                 <div className="flex flex-wrap items-center gap-3 text-sm">
@@ -880,6 +927,33 @@ export default function ResultsPage() {
                 <MutedBox text="AI report is being prepared..." />
               ) : (
                 <div className="grid gap-5">
+                  <div
+                    className={`rounded-[24px] border px-4 py-3 ${
+                      isDegradedReport
+                        ? "border-amber-300/20 bg-amber-400/10 text-amber-100"
+                        : "border-emerald-300/20 bg-emerald-400/10 text-emerald-100"
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="text-sm font-bold">{reportQualityBannerText}</div>
+                      <span
+                        className="mt-0.5 text-slate-200/80"
+                        title={
+                          isDegradedReport
+                            ? "Low-content-quality means the report matched the schema but contained mostly placeholder sections, so review is recommended."
+                            : "Validated means the stored report passed the current schema and quality checks."
+                        }
+                      >
+                        <Info size={15} />
+                      </span>
+                    </div>
+                    <div className="mt-2 text-xs text-slate-200/80">
+                      {isDegradedReport
+                        ? "This report is still available for review, but it should not be treated as strong automated evidence without a manual check."
+                        : "This report is the best currently available stored result for this file."}
+                    </div>
+                  </div>
+
                   <div className="grid gap-4 md:grid-cols-3">
                     <MetricCard title="Final">
                       <ConfidenceMeter value={finalConf} />
@@ -982,9 +1056,9 @@ export default function ResultsPage() {
                       <div>
                         LLM mode: <b className="text-white">Safe mode</b>
                       </div>
-                      {latest?.item?.model_versions?.llm_fallback ? (
+                      {reportFallbackModel ? (
                         <div>
-                          Fallback model: <b className="text-white">{latest.item.model_versions.llm_fallback}</b>
+                          Fallback model: <b className="text-white">{reportFallbackModel}</b>
                         </div>
                       ) : null}
                     </>
@@ -996,10 +1070,10 @@ export default function ResultsPage() {
                           latest?.item?.model_versions?.llm_primary ||
                           "—"}
                       </b>
-                      {latest?.item?.model_versions?.llm_fallback ? (
+                      {reportFallbackModel ? (
                         <span className="text-slate-400">
                           {" "}
-                          (fallback: {latest.item.model_versions.llm_fallback})
+                          (fallback: {reportFallbackModel})
                         </span>
                       ) : null}
                     </div>

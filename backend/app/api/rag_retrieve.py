@@ -22,6 +22,10 @@ class RAGRetrieveIn(BaseModel):
     official_bias: float = Field(default=0.0, ge=0.0, le=1.0)
     ml_signals: dict = Field(default_factory=dict)
     official_only: bool | None = None
+    text_excerpt: str | None = None
+    title_hint: str | None = None
+    keywords: list[str] = Field(default_factory=list)
+    mode: str | None = None
 
 
 @router.post("/student/retrieve")
@@ -41,6 +45,10 @@ async def rag_student_retrieve(
             analysis_type=body.analysis_type,
             preferred_categories=body.preferred_categories,
             official_bias=body.official_bias,
+            text_excerpt=body.text_excerpt,
+            keywords=body.keywords,
+            title_hint=body.title_hint,
+            mode=body.mode,
         )
         return result.model_dump()
     except PermissionError as e:
@@ -67,6 +75,10 @@ async def rag_professor_retrieve(
             analysis_type=body.analysis_type,
             preferred_categories=body.preferred_categories,
             official_bias=body.official_bias,
+            text_excerpt=body.text_excerpt,
+            keywords=body.keywords,
+            title_hint=body.title_hint,
+            mode=body.mode,
         )
         return result.model_dump()
     except PermissionError as e:

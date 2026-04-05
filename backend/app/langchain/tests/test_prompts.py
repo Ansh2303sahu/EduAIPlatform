@@ -46,6 +46,7 @@ def _student_ctx() -> PipelineContext:
             confidence_score=0.91,
             confidence_label="high",
             safe_review=False,
+            trace={"mode": "code", "keywords_used": ["fastapi", "react"], "selected_titles": ["Project Guide"]},
         ),
     )
 
@@ -80,6 +81,7 @@ def _professor_ctx() -> PipelineContext:
             confidence_score=0.89,
             confidence_label="high",
             safe_review=False,
+            trace={"mode": "rubric", "keywords_used": ["rubric", "moderation"], "selected_titles": ["Moderation Handbook"]},
         ),
     )
 
@@ -92,8 +94,10 @@ def test_student_prompt_contains_required_sections() -> None:
     assert "PHASE 6 ML PREDICTIONS" in prompt
     assert "STUDENT RAG CONTEXT" in prompt
     assert "Never invent citations" in prompt
-    assert '"summary": "string"' in prompt
+    assert '"summary":"string"' in prompt
     assert '"strengths"' in prompt
+    assert "senior technical reviewer" in prompt
+    assert "Retrieval trace summary:" in prompt
 
 
 def test_student_safe_prompt_contains_restricted_rules() -> None:
@@ -110,6 +114,7 @@ def test_professor_prompt_contains_discrepancy_guidance() -> None:
     assert "PROFESSOR RAG CONTEXT" in prompt
     assert "rubric_breakdown" in prompt
     assert "Never invent citations" in prompt
+    assert "rubric, policy, moderation consistency" in prompt
 
 
 def test_professor_safe_prompt_contains_review_rules() -> None:

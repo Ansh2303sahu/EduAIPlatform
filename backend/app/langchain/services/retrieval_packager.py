@@ -30,7 +30,13 @@ from app.rag.schemas import RetrievedChunk
 
 logger = logging.getLogger("phase10.retrieval_packager")
 
-_DEFAULT_PROMPT_CHAR_BUDGET = max(1500, min(phase10_settings.max_input_chars, 12_000))
+_DEFAULT_PROMPT_CHAR_BUDGET = max(
+    1500,
+    min(
+        phase10_settings.max_input_chars,
+        phase10_settings.prompt_rag_context_chars,
+    ),
+)
 _WEAK_RETRIEVAL_MIN_CONTEXT_CHARS = 220
 _MIN_TRUNCATED_CHUNK_CHARS = 80
 
@@ -59,6 +65,10 @@ def package_retrieval_chunks(
     deduped_chunks = _dedupe_chunks(chunks)
     selected_chunks = _select_chunks_for_budget(deduped_chunks, max_chars=max_chars)
     rendered_context = _render_context(selected_chunks)
+    packaging_trimmed = len(selected_chunks) < len(deduped_chunks) or any(
+        selected.content != original.content
+        for selected, original in zip(selected_chunks, deduped_chunks, strict=False)
+    )
 
     if not rendered_context:
         rendered_context = sanitize_retrieved_text(context_text, max_chars=max_chars)
@@ -86,6 +96,9 @@ def package_retrieval_chunks(
             "packaging_chunk_count": chunk_count,
             "packaging_context_chars": len(rendered_context),
             "packaging_weak_retrieval": weak_retrieval,
+            "packaging_trimmed": packaging_trimmed,
+            "packaging_selected_titles": [chunk.document_title for chunk in selected_chunks],
+            "packaging_selected_categories": [chunk.category for chunk in selected_chunks],
         }
     )
 
@@ -246,6 +259,11 @@ def _normalize_chunks(
         if audience != role:
             continue
 
+        metadata = deepcopy(_as_dict(data.get("metadata")))
+        status = _as_str(data.get("status") or metadata.get("status"), default="active").lower()
+        if status and status != "active":
+            continue
+
         content = sanitize_retrieved_text(_as_str(data.get("content")), max_chars=_DEFAULT_PROMPT_CHAR_BUDGET)
         if not content:
             continue
@@ -261,7 +279,7 @@ def _normalize_chunks(
             "score": _as_float(data.get("score"), default=0.0),
             "source_priority": _clamp_int(data.get("source_priority"), default=0, minimum=0),
             "is_official": bool(data.get("is_official", False)),
-            "metadata": deepcopy(_as_dict(data.get("metadata"))),
+            "metadata": metadata,
         }
 
         try:
@@ -408,3 +426,24 @@ def _is_weak_retrieval(
     if len(context_text.strip()) < _WEAK_RETRIEVAL_MIN_CONTEXT_CHARS:
         return True
     return False
+
+
+def summarize_rag_trace(trace: Mapping[str, Any] | None) -> dict[str, Any]:
+    """
+    Build a compact, storage-safe retrieval summary for execution metadata.
+    """
+    data = dict(trace or {})
+    return {
+        "query": _as_str(data.get("query"))[:240],
+        "mode": _as_str(data.get("mode")),
+        "title_hint": _as_str(data.get("title_hint"))[:180],
+        "keywords_used": list(data.get("keywords_used") or [])[:8],
+        "selected_titles": list(data.get("selected_titles") or data.get("packaging_selected_titles") or [])[:6],
+        "final_categories": list(data.get("final_categories") or data.get("packaging_selected_categories") or [])[:8],
+        "applied_filters": _as_dict(data.get("applied_filters")),
+        "initial_candidate_count": _clamp_int(data.get("initial_candidate_count"), default=0, minimum=0),
+        "degraded_input": bool(data.get("degraded_input", False)),
+        "reranking_changed_order": bool(data.get("reranking_changed_order", False)),
+        "packaging_trimmed": bool(data.get("packaging_trimmed", False)),
+        "packaging_context_chars": _clamp_int(data.get("packaging_context_chars"), default=0, minimum=0),
+    }

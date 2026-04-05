@@ -79,8 +79,8 @@ class LangChainSettings(_BaseSettings):  # type: ignore[misc]
         default="http://host.docker.internal:11434",
         alias="OLLAMA_BASE_URL",
     )
-    ollama_primary_model: str = Field(default="gemma3:latest", alias="OLLAMA_PRIMARY_MODEL")
-    ollama_fallback_model: str = Field(default="mistral:latest", alias="OLLAMA_FALLBACK_MODEL")
+    ollama_primary_model: str = Field(default="mistral:latest", alias="OLLAMA_PRIMARY_MODEL")
+    ollama_fallback_model: str = Field(default="gemma3:latest", alias="OLLAMA_FALLBACK_MODEL")
 
     # ── Anthropic / Claude ───────────────────────────────────────────────────
     anthropic_api_key: str = Field(default="", alias="ANTHROPIC_API_KEY")
@@ -95,9 +95,27 @@ class LangChainSettings(_BaseSettings):  # type: ignore[misc]
 
     # ── Generation limits ────────────────────────────────────────────────────
     timeout_seconds: int = Field(default=120, alias="PHASE10_TIMEOUT_SECONDS")
+    student_timeout_seconds: int = Field(default=210, alias="PHASE10_STUDENT_TIMEOUT_SECONDS")
+    professor_timeout_seconds: int = Field(default=210, alias="PHASE10_PROFESSOR_TIMEOUT_SECONDS")
     max_retries: int = Field(default=2, alias="PHASE10_MAX_RETRIES")
     max_context_chars: int = Field(default=50_000, alias="PHASE10_MAX_CONTEXT_CHARS")
     max_output_chars: int = Field(default=4096, alias="PHASE10_MAX_OUTPUT_CHARS")
+    student_max_output_tokens: int = Field(default=800, alias="PHASE10_STUDENT_MAX_OUTPUT_TOKENS")
+    professor_max_output_tokens: int = Field(default=900, alias="PHASE10_PROFESSOR_MAX_OUTPUT_TOKENS")
+    student_project_top_k: int = Field(default=8, alias="PHASE10_STUDENT_PROJECT_TOP_K")
+    student_academic_top_k: int = Field(default=6, alias="PHASE10_STUDENT_ACADEMIC_TOP_K")
+    professor_project_top_k: int = Field(default=8, alias="PHASE10_PROFESSOR_PROJECT_TOP_K")
+    professor_academic_top_k: int = Field(default=6, alias="PHASE10_PROFESSOR_ACADEMIC_TOP_K")
+    prompt_submission_text_chars: int = Field(default=2200, alias="PHASE10_PROMPT_SUBMISSION_TEXT_CHARS")
+    prompt_ocr_chars: int = Field(default=500, alias="PHASE10_PROMPT_OCR_CHARS")
+    prompt_transcript_chars: int = Field(default=500, alias="PHASE10_PROMPT_TRANSCRIPT_CHARS")
+    prompt_table_chars: int = Field(default=700, alias="PHASE10_PROMPT_TABLE_CHARS")
+    prompt_submission_summary_chars: int = Field(default=420, alias="PHASE10_PROMPT_SUBMISSION_SUMMARY_CHARS")
+    prompt_trace_excerpt_chars: int = Field(default=180, alias="PHASE10_PROMPT_TRACE_EXCERPT_CHARS")
+    prompt_rag_context_chars: int = Field(default=1800, alias="PHASE10_PROMPT_RAG_CONTEXT_CHARS")
+    prompt_rag_citation_limit: int = Field(default=4, alias="PHASE10_PROMPT_RAG_CITATION_LIMIT")
+    prompt_rag_chunk_preview_limit: int = Field(default=2, alias="PHASE10_PROMPT_RAG_CHUNK_PREVIEW_LIMIT")
+    prompt_rag_chunk_preview_chars: int = Field(default=120, alias="PHASE10_PROMPT_RAG_CHUNK_PREVIEW_CHARS")
 
     # ── Per-role temperatures ────────────────────────────────────────────────
     student_temperature: float = Field(default=0.1, alias="PHASE10_STUDENT_TEMPERATURE")
@@ -150,6 +168,26 @@ class LangChainSettings(_BaseSettings):  # type: ignore[misc]
         if role_str == ChainRole.PROFESSOR.value:
             return self.professor_temperature
         return self.student_temperature
+
+    def retrieval_top_k_for(self, role: Union[str, ChainRole], submission_kind: str) -> int:
+        role_str = role.value if isinstance(role, ChainRole) else str(role).lower()
+        normalized_kind = str(submission_kind or "").strip().lower()
+        is_project = normalized_kind == "project"
+        if role_str == ChainRole.PROFESSOR.value:
+            return self.professor_project_top_k if is_project else self.professor_academic_top_k
+        return self.student_project_top_k if is_project else self.student_academic_top_k
+
+    def timeout_for(self, role: Union[str, ChainRole]) -> int:
+        role_str = role.value if isinstance(role, ChainRole) else str(role).lower()
+        if role_str == ChainRole.PROFESSOR.value:
+            return self.professor_timeout_seconds
+        return self.student_timeout_seconds
+
+    def output_tokens_for(self, role: Union[str, ChainRole]) -> int:
+        role_str = role.value if isinstance(role, ChainRole) else str(role).lower()
+        if role_str == ChainRole.PROFESSOR.value:
+            return self.professor_max_output_tokens
+        return self.student_max_output_tokens
 
     # ── Backward-compatible aliases (used by existing service files) ─────────
     # These are plain properties so they do not participate in pydantic

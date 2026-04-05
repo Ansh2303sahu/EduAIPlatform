@@ -227,15 +227,20 @@ class ExecutionMetadata(BaseModel):
 
     # Versioning
     chain_version: str = "1.0"
+    chain_name: str = ""
     student_prompt_version: str = "v1"
     professor_prompt_version: str = "v1"
     schema_version: str = "1.0"
+    analysis_type: str = ""
+    submission_kind: str = ""
 
     # Timing (ms)
     timings_ms: Dict[str, int] = Field(default_factory=dict)
 
     # Agreement score (0.0–1.0)
     agreement_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    retrieval_debug: Dict[str, Any] = Field(default_factory=dict)
+    prompt_debug: Dict[str, Any] = Field(default_factory=dict)
 
     def to_model_versions_dict(self) -> Dict[str, Any]:
         """
@@ -253,8 +258,13 @@ class ExecutionMetadata(BaseModel):
             "agreement": {
                 "final_confidence": self.agreement_score,
             },
+            "chain_name": self.chain_name,
             "chain_version": self.chain_version,
             "schema_version": self.schema_version,
+            "analysis_type": self.analysis_type,
+            "submission_kind": self.submission_kind,
+            "retrieval_debug": self.retrieval_debug,
+            "prompt_debug": self.prompt_debug,
         }
 
 
@@ -315,6 +325,7 @@ class PipelineContext(BaseModel):
 
     # ── Generation ────────────────────────────────────────────────────────────
     prompt_text: str = ""
+    prompt_meta: Dict[str, Any] = Field(default_factory=dict)
     raw_llm_output: str = ""
     model_used: str = ""
     llm_ok: bool = False

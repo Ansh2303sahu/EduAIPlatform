@@ -77,6 +77,11 @@ def _coerce_timeout(timeout: float | int | None) -> float:
         return float(phase10_settings.llm_timeout_seconds)
 
 
+def _describe_http_error(exc: BaseException) -> str:
+    text = str(exc).strip()
+    return text or repr(exc)
+
+
 def _coerce_role(role: str | ChainRole) -> str:
     return role.value if isinstance(role, ChainRole) else str(role).strip().lower()
 
@@ -111,6 +116,9 @@ async def _call_llm_service(spec: _LLMServiceModelSpec, prompt_text: str) -> AIM
         "role": spec.role,
         "temperature": spec.temperature,
         "requested_model": spec.model_name,
+        "options": {
+            "num_predict": phase10_settings.output_tokens_for(spec.role),
+        },
     }
     timeout = httpx.Timeout(
         connect=min(spec.timeout_seconds, 15.0),
@@ -119,12 +127,28 @@ async def _call_llm_service(spec: _LLMServiceModelSpec, prompt_text: str) -> AIM
         pool=30.0,
     )
 
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        response = await client.post(
-            spec.endpoint,
-            json=payload,
-            headers=_llm_service_headers(),
-        )
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(
+                spec.endpoint,
+                json=payload,
+                headers=_llm_service_headers(),
+            )
+    except httpx.TimeoutException as exc:
+        raise RuntimeError(
+            f"llm-service generate timeout role={spec.role} model={spec.model_name} "
+            f"timeout_s={spec.timeout_seconds}: {_describe_http_error(exc)}"
+        ) from exc
+    except httpx.ConnectError as exc:
+        raise RuntimeError(
+            f"llm-service generate connect_error role={spec.role} endpoint={spec.endpoint}: "
+            f"{_describe_http_error(exc)}"
+        ) from exc
+    except httpx.HTTPError as exc:
+        raise RuntimeError(
+            f"llm-service generate transport_error role={spec.role} endpoint={spec.endpoint}: "
+            f"{_describe_http_error(exc)}"
+        ) from exc
 
     if response.status_code >= 400:
         detail = response.text[:400]
@@ -181,7 +205,11 @@ def _build_model_spec(
         role=role_name,
         base_url=_llm_service_base_url(base_url),
         model_name=_resolve_model_name(primary=primary, model_name=model_name),
-        timeout_seconds=_coerce_timeout(timeout),
+        timeout_seconds=(
+            _coerce_timeout(timeout)
+            if timeout is not None
+            else float(phase10_settings.timeout_for(role_name))
+        ),
         temperature=float(phase10_settings.temperature_for(role_name) if temperature is None else temperature),
         primary=primary,
     )

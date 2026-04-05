@@ -34,8 +34,11 @@ class Settings(BaseModel):
 
     # Ollama settings
     ollama_base_url: str = os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
-    primary_model: str = os.getenv("OLLAMA_PRIMARY_MODEL", "gemma3:latest")
-    fallback_model: str = os.getenv("OLLAMA_FALLBACK_MODEL", "mistral:latest")
+    primary_model: str = os.getenv("OLLAMA_PRIMARY_MODEL", "mistral:latest")
+    fallback_model: str = os.getenv(
+        "OLLAMA_FALLBACK_MODEL",
+        os.getenv("OLLAMA_PRIMARY_MODEL", "mistral:latest"),
+    )
     ollama_options_json: str = os.getenv("OLLAMA_OPTIONS_JSON", "")
 
     # Anthropic / Claude settings

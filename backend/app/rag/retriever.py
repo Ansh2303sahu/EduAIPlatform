@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
 from collections import defaultdict
 from typing import Any, Callable, cast
 
 from app.core.config import settings
+
+logger = logging.getLogger("rag.retriever")
 from app.rag.cache.cache_keys import build_retrieval_cache_key
 from app.rag.cache.retrieval_cache import InMemoryRetrievalCache
 from app.rag.citations import citations_from_chunks
@@ -28,9 +31,6 @@ from app.rag.vector_store import get_vector_store
 
 
 _RETRIEVAL_CACHE = InMemoryRetrievalCache(ttl_seconds=settings.rag_cache_ttl_seconds)
-_MMR_LAMBDA_MULT = 0.35
-_MMR_FETCH_K_MIN = 12
-_MMR_FETCH_K_MAX = 24
 
 
 _TOPIC_CATEGORY_MAP: dict[str, dict[str, list[str]]] = {
@@ -179,7 +179,7 @@ def mmr_search_clean(
     fetch_k: int = 12,
     metadata_filter: dict[str, Any] | None = None,
 ) -> list[tuple[Any, float]]:
-    fetch_k = max(k, min(fetch_k, _MMR_FETCH_K_MAX))
+    fetch_k = max(k, min(fetch_k, settings.rag_mmr_fetch_k_max))
     scored_results = similarity_search_clean(
         store,
         query,
@@ -195,8 +195,8 @@ def mmr_search_clean(
         mmr_docs = mmr_search(
             query,
             k=k,
-            fetch_k=max(fetch_k, _MMR_FETCH_K_MIN),
-            lambda_mult=_MMR_LAMBDA_MULT,
+            fetch_k=max(fetch_k, settings.rag_mmr_fetch_k_min),
+            lambda_mult=settings.rag_mmr_lambda,
             filter=metadata_filter,
         )
     except Exception:
@@ -283,6 +283,22 @@ def retrieve(req: RetrievalQuery) -> RetrievalResult:
     queries = build_queries(req)
     metadata_filter = _metadata_filter_dict(req)
 
+    logger.info(
+        "rag.retrieve start audience=%s analysis_type=%s submission_type=%s "
+        "mode=%s top_k=%s filters=%s title=%r keywords=%s excerpt_len=%s degraded_input=%s queries=%s",
+        req.audience,
+        req.analysis_type or "unset",
+        req.submission_type or "unset",
+        req.mode or "unset",
+        req.top_k,
+        metadata_filter,
+        req.title_hint,
+        req.keywords or [],
+        len(req.text_excerpt or ""),
+        req.degraded_input,
+        queries,
+    )
+
     merged: dict[tuple[str, str], RetrievedChunk] = {}
     retrieved_ids: list[str] = []
     retrieved_scores: list[float] = []
@@ -305,7 +321,7 @@ def retrieve(req: RetrievalQuery) -> RetrievalResult:
             store,
             q,
             k=initial_k,
-            fetch_k=max(initial_k * 2, _MMR_FETCH_K_MIN),
+            fetch_k=max(initial_k * 2, settings.rag_mmr_fetch_k_min),
             metadata_filter=metadata_filter,
         )
 
@@ -344,9 +360,20 @@ def retrieve(req: RetrievalQuery) -> RetrievalResult:
             retrieved_ids.append(chunk_id)
             retrieved_scores.append(normalized_score)
 
+    pre_rerank_order = [c.chunk_id for c in sorted(merged.values(), key=lambda c: c.score, reverse=True)]
     reranked_chunks = rerank_chunks(req, list(merged.values()))
+    reranked_order = [c.chunk_id for c in reranked_chunks]
+    reranking_changed = pre_rerank_order[:len(reranked_order)] != reranked_order
+
     final_chunks = _select_diverse_chunks(reranked_chunks, req.top_k)
     final_chunks = _apply_context_limits(final_chunks, req.top_k)
+
+    final_categories = sorted({c.category for c in final_chunks})
+    final_titles = [c.document_title for c in final_chunks]
+    retrieved_titles = [
+        chunk.document_title
+        for chunk in sorted(merged.values(), key=lambda c: c.score, reverse=True)[: min(len(merged), 10)]
+    ]
 
     citations = citations_from_chunks(final_chunks)
 
@@ -354,11 +381,25 @@ def retrieve(req: RetrievalQuery) -> RetrievalResult:
     safe_review = safe_review_required(confidence_label)
     integrity_focus = detect_integrity_relevance(req.query, final_chunks)
 
+    logger.info(
+        "rag.retrieve done audience=%s initial_candidates=%s final_chunks=%s confidence=%s/%0.2f "
+        "categories=%s titles=%s reranking_changed=%s",
+        req.audience,
+        len(merged),
+        len(final_chunks),
+        confidence_label,
+        confidence_score,
+        final_categories,
+        final_titles,
+        reranking_changed,
+    )
+
     trace = build_trace(
         req=req,
         queries=queries,
         retrieved_chunk_ids=retrieved_ids,
         final_chunks=final_chunks,
+        retrieved_titles=retrieved_titles,
         scores=retrieved_scores,
         collection_name=collection_name,
         cache_hit=False,
@@ -368,6 +409,12 @@ def retrieve(req: RetrievalQuery) -> RetrievalResult:
         requested_top_k=requested_top_k,
         effective_top_k=req.top_k,
         token_budget=settings.rag_context_max_tokens if settings.rag_enable_contextual_compression else None,
+        applied_filters=metadata_filter or {},
+        final_categories=final_categories,
+        reranking_changed_order=reranking_changed,
+        initial_candidate_count=len(merged),
+        confidence_score=confidence_score,
+        confidence_label=confidence_label,
     )
 
     result = RetrievalResult(

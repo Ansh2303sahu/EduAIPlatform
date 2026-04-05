@@ -44,7 +44,7 @@ class Settings(BaseSettings):
 
     # CORS
     allowed_origins_raw: str = Field(
-        default="http://localhost:3000",
+        default="http://localhost:3000,http://127.0.0.1:3000",
         alias="ALLOWED_ORIGINS",
     )
 
@@ -83,8 +83,8 @@ class Settings(BaseSettings):
     llm_service_url: str = Field(default="http://llm-service:8030", alias="LLM_SERVICE_URL")
     llm_service_secret: str = Field(default="", alias="LLM_SERVICE_SECRET")
     # Display labels stored in model_versions — set to match LLM_PROVIDER choice
-    llm_primary_label: str = Field(default="gemma3:latest", alias="LLM_PRIMARY_LABEL")
-    llm_fallback_label: str = Field(default="mistral:latest", alias="LLM_FALLBACK_LABEL")
+    llm_primary_label: str = Field(default="mistral:latest", alias="LLM_PRIMARY_LABEL")
+    llm_fallback_label: str = Field(default="gemma3:latest", alias="LLM_FALLBACK_LABEL")
 
     # -------------------------
     # Phase 9 — RAG core
@@ -121,6 +121,9 @@ class Settings(BaseSettings):
     rag_semantic_weight: float = Field(default=0.65, alias="RAG_SEMANTIC_WEIGHT")
     rag_keyword_weight: float = Field(default=0.35, alias="RAG_KEYWORD_WEIGHT")
     rag_enable_rerank: bool = Field(default=True, alias="RAG_ENABLE_RERANK")
+    rag_mmr_lambda: float = Field(default=0.55, alias="RAG_MMR_LAMBDA")
+    rag_mmr_fetch_k_min: int = Field(default=12, alias="RAG_MMR_FETCH_K_MIN")
+    rag_mmr_fetch_k_max: int = Field(default=24, alias="RAG_MMR_FETCH_K_MAX")
     rag_enable_contextual_compression: bool = Field(
         default=True,
         alias="RAG_ENABLE_CONTEXTUAL_COMPRESSION",
@@ -149,6 +152,9 @@ class Settings(BaseSettings):
     rag_context_max_chunks: int = Field(default=4, alias="RAG_CONTEXT_MAX_CHUNKS")
     rag_context_max_tokens: int = Field(default=2500, alias="RAG_CONTEXT_MAX_TOKENS")
     rag_inject_confidence_note: bool = Field(default=True, alias="RAG_INJECT_CONFIDENCE_NOTE")
+    rag_query_excerpt_chars: int = Field(default=650, alias="RAG_QUERY_EXCERPT_CHARS")
+    rag_query_title_chars: int = Field(default=160, alias="RAG_QUERY_TITLE_CHARS")
+    rag_dynamic_keyword_limit: int = Field(default=12, alias="RAG_DYNAMIC_KEYWORD_LIMIT")
 
     # Confidence / grounding
     rag_min_confidence: float = Field(default=0.45, alias="RAG_MIN_CONFIDENCE")
@@ -160,6 +166,22 @@ class Settings(BaseSettings):
     rag_enable_unsupported_claim_detector: bool = Field(
         default=True,
         alias="RAG_ENABLE_UNSUPPORTED_CLAIM_DETECTOR",
+    )
+    rag_rerank_preferred_category_bonus: float = Field(
+        default=0.09,
+        alias="RAG_RERANK_PREFERRED_CATEGORY_BONUS",
+    )
+    rag_rerank_off_topic_penalty: float = Field(
+        default=0.03,
+        alias="RAG_RERANK_OFF_TOPIC_PENALTY",
+    )
+    rag_rerank_professor_policy_bonus: float = Field(
+        default=0.05,
+        alias="RAG_RERANK_PROFESSOR_POLICY_BONUS",
+    )
+    rag_rerank_official_bonus: float = Field(
+        default=0.04,
+        alias="RAG_RERANK_OFFICIAL_BONUS",
     )
 
     # Caching

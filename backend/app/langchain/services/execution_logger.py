@@ -55,8 +55,11 @@ class Phase10ExecutionRecord(BaseModel):
     user_id: str = ""
     model_used: str = ""
     chain_version: str = ""
+    chain_name: str = ""
     prompt_version: str = ""
     schema_version: str = ""
+    analysis_type: str = ""
+    submission_kind: str = ""
     execution_mode: str = ExecutionMode.NORMAL.value
     retry_count: int = 0
     parse_failures: int = 0
@@ -66,6 +69,15 @@ class Phase10ExecutionRecord(BaseModel):
     decision_source: str = DecisionSource.LLM.value
     fallback_triggered: bool = False
     fallback_reason: str = ""
+    retrieval_mode: str = ""
+    query_summary: str = ""
+    title_hint: str = ""
+    prompt_chars: int = 0
+    prompt_trimmed: bool = False
+    retrieved_doc_count: int = 0
+    selected_doc_titles: list[str] = Field(default_factory=list)
+    selected_categories: list[str] = Field(default_factory=list)
+    degraded_retrieval_mode: bool = False
     duration_ms: int = 0
     parse_failure_details: list[str] = Field(default_factory=list)
     validation_failure_details: list[str] = Field(default_factory=list)
@@ -145,6 +157,9 @@ class Phase10ExecutionLogger(BaseCallbackHandler):
         file_id: str | None = None,
         user_id: str | None = None,
         model_used: str | None = None,
+        chain_name: str | None = None,
+        analysis_type: str | None = None,
+        submission_kind: str | None = None,
     ) -> "Phase10ExecutionLogger":
         if file_id is not None:
             self.record.file_id = file_id
@@ -152,6 +167,12 @@ class Phase10ExecutionLogger(BaseCallbackHandler):
             self.record.user_id = user_id
         if model_used is not None:
             self.record.model_used = model_used
+        if chain_name is not None:
+            self.record.chain_name = str(chain_name)
+        if analysis_type is not None:
+            self.record.analysis_type = str(analysis_type)
+        if submission_kind is not None:
+            self.record.submission_kind = str(submission_kind)
         return self
 
     def set_model_used(self, model_used: str) -> "Phase10ExecutionLogger":
@@ -164,6 +185,56 @@ class Phase10ExecutionLogger(BaseCallbackHandler):
 
     def set_decision_source(self, source: str | DecisionSource) -> "Phase10ExecutionLogger":
         self.record.decision_source = source.value if isinstance(source, DecisionSource) else str(source)
+        return self
+
+    def set_prompt_metrics(
+        self,
+        *,
+        prompt_text: str | None = None,
+        prompt_chars: int | None = None,
+        prompt_trimmed: bool | None = None,
+    ) -> "Phase10ExecutionLogger":
+        if prompt_chars is not None:
+            self.record.prompt_chars = max(0, int(prompt_chars))
+        elif prompt_text is not None:
+            self.record.prompt_chars = len(prompt_text)
+        if prompt_trimmed is not None:
+            self.record.prompt_trimmed = bool(prompt_trimmed)
+        return self
+
+    def set_retrieval_summary(
+        self,
+        *,
+        retrieval_mode: str | None = None,
+        query_summary: str | None = None,
+        title_hint: str | None = None,
+        retrieved_doc_count: int | None = None,
+        selected_doc_titles: list[str] | None = None,
+        selected_categories: list[str] | None = None,
+        degraded_retrieval_mode: bool | None = None,
+    ) -> "Phase10ExecutionLogger":
+        if retrieval_mode is not None:
+            self.record.retrieval_mode = str(retrieval_mode)
+        if query_summary is not None:
+            self.record.query_summary = _clip_text(query_summary, 240)
+        if title_hint is not None:
+            self.record.title_hint = _clip_text(title_hint, 180)
+        if retrieved_doc_count is not None:
+            self.record.retrieved_doc_count = max(0, int(retrieved_doc_count))
+        if selected_doc_titles is not None:
+            self.record.selected_doc_titles = [
+                _clip_text(title, 140)
+                for title in selected_doc_titles
+                if str(title).strip()
+            ][:6]
+        if selected_categories is not None:
+            self.record.selected_categories = [
+                _clip_text(category, 80)
+                for category in selected_categories
+                if str(category).strip()
+            ][:8]
+        if degraded_retrieval_mode is not None:
+            self.record.degraded_retrieval_mode = bool(degraded_retrieval_mode)
         return self
 
     def set_flags(
@@ -286,6 +357,8 @@ class Phase10ExecutionLogger(BaseCallbackHandler):
         key = str(run_id)
         self._run_start_times[key] = time.perf_counter()
         self._prompt_chars += sum(len(prompt) for prompt in prompts)
+        if self._prompt_chars > self.record.prompt_chars:
+            self.record.prompt_chars = self._prompt_chars
         if self._enable_logging:
             logger.debug(
                 "phase10 llm_start request_id=%s role=%s run_id=%s prompt_chars=%d",

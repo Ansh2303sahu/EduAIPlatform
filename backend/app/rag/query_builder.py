@@ -4,6 +4,7 @@ import re
 from typing import Any
 
 from app.core.config import settings
+from app.rag.config import get_rag_runtime_config
 from app.rag.schemas import RetrievalQuery
 from app.rag.topic_detector import detect_topic
 from app.rag.utils.text_cleaner import normalize_whitespace
@@ -13,6 +14,7 @@ _MAX_QUERY_CHARS = 320
 _MAX_QUERY_COUNT = 7
 _MAX_FOCUS_TERMS = 7
 _MAX_FOCUS_CHARS = 80
+_MAX_PRIMARY_QUERY_CHARS = 120
 
 _STOPWORDS = {
     "a",
@@ -146,7 +148,7 @@ _STUDENT_PROJECT_HINTS = [
     "system architecture backend frontend database",
     "authentication security testing limitations",
     "implementation quality integration quality",
-    "analytics ai features technical review",
+    "software engineering testing security maintainability code review",
 ]
 
 _PROFESSOR_HINTS = {
@@ -178,6 +180,10 @@ _QUERY_TERM_HINTS = {
         "testing": ["testing evaluation validation"],
         "ai": ["ai insights model limitations evaluation"],
         "machine learning": ["ai insights model limitations evaluation"],
+        "c#": ["c# windows forms architecture event handling"],
+        ".net": ["dotnet windows forms architecture maintainability"],
+        "windows forms": ["windows forms event handling ui state validation"],
+        "algorithm": ["algorithm correctness performance maintainability"],
     },
     "professor": {
         "project": ["project rubric technical implementation evaluation"],
@@ -316,10 +322,97 @@ def _contains_any(text: str, terms: tuple[str, ...]) -> bool:
 def _project_like(req: RetrievalQuery) -> bool:
     submission_type = _normalize(req.submission_type or "").lower()
     analysis_type = _normalize(req.analysis_type or "").lower()
+    mode = _normalize(req.mode or "").lower()
     return (
         submission_type in {"project", "software_project", "dissertation_project", "capstone"}
         or "project" in analysis_type
+        or mode in {"code", "project"}
     )
+
+
+def _keyword_hint(req: RetrievalQuery) -> str:
+    """Return a compact string of submission-extracted keywords for query anchoring."""
+    if req.title_hint:
+        title_terms = _focus_terms_from_text(req.title_hint, req.audience)
+        if title_terms:
+            return " ".join(title_terms[:6])
+    if req.keywords:
+        return " ".join(req.keywords[:8])
+    if req.text_excerpt:
+        terms = _focus_terms_from_text(req.text_excerpt, req.audience)
+        return " ".join(terms[:8])
+    return ""
+
+
+def _mode_hint(req: RetrievalQuery) -> str:
+    mode = _normalize(req.mode or "").lower()
+    if not mode:
+        if req.audience == "student":
+            return "software project" if _project_like(req) else "academic writing"
+        return "project rubric" if _project_like(req) else "rubric policy"
+    if mode == "code":
+        return "software project"
+    if mode == "essay":
+        return "academic writing"
+    if mode == "feedback":
+        return "feedback template moderation"
+    if mode == "policy":
+        return "marking policy moderation"
+    if mode == "moderation":
+        return "moderation rubric"
+    if mode == "rubric":
+        return "rubric criteria"
+    return mode
+
+
+def _primary_anchor_query(req: RetrievalQuery, focus_hint: str) -> str:
+    runtime = get_rag_runtime_config()
+    parts: list[str] = []
+    title_terms = _focus_terms_from_text(req.title_hint or "", req.audience)
+    if title_terms:
+        parts.append(" ".join(title_terms[:4]))
+    parts.append(_mode_hint(req))
+    if focus_hint:
+        parts.append(focus_hint)
+    keyword_hint = _keyword_hint(req)
+    if keyword_hint:
+        parts.append(keyword_hint)
+    if req.analysis_type:
+        parts.append(_normalize(req.analysis_type).replace("_", " "))
+    anchor = _join_parts(*parts)
+    if anchor:
+        return _clip_query(anchor, max_chars=min(runtime.query_excerpt_chars, _MAX_PRIMARY_QUERY_CHARS))
+    return _clip_query(_join_parts(req.query, _mode_hint(req)), max_chars=_MAX_PRIMARY_QUERY_CHARS)
+
+
+def _focus_terms_from_text(text: str, audience: str) -> list[str]:
+    """Like _focus_terms but operates on a raw text excerpt instead of req.query."""
+    lowered = _normalize(text).lower()[:2000]
+    candidates: list[str] = []
+    for term in _all_known_terms(audience):
+        if term and term in lowered:
+            term_tokens = set(_query_tokens(term))
+            if term in _LOW_VALUE_FOCUS_TERMS:
+                continue
+            if term_tokens and term_tokens.issubset(_LOW_VALUE_FOCUS_TERMS):
+                continue
+            candidates.append(term)
+    for token in _query_tokens(lowered):
+        if token in _STOPWORDS or token in _LOW_VALUE_FOCUS_TERMS:
+            continue
+        if len(token) < 2 and token != "ai":
+            continue
+        candidates.append(token)
+    seen: set[str] = set()
+    focus: list[str] = []
+    for term in candidates:
+        norm = _normalize(term).lower()
+        if norm and norm not in seen:
+            seen.add(norm)
+            focus.append(norm)
+            if len(focus) >= _MAX_FOCUS_TERMS:
+                break
+    return focus
 
 
 def _student_project_queries(req: RetrievalQuery, focus_hint: str) -> list[str]:
@@ -327,7 +420,13 @@ def _student_project_queries(req: RetrievalQuery, focus_hint: str) -> list[str]:
         req.query,
         ("stock", "portfolio", "finance", "financial", "trading", "sharpe", "dashboard", "analytics", "ai"),
     )
-    semantic_summary = _semantic_summary(req, focus_hint)
+    # Also check the text excerpt for finance terms
+    if not finance_focus and req.text_excerpt:
+        finance_focus = _contains_any(
+            req.text_excerpt,
+            ("stock", "portfolio", "finance", "financial", "trading", "sharpe", "dashboard"),
+        )
+    kw_hint = _keyword_hint(req)
     implementation_summary = (
         "django stock portfolio management implementation transaction analytics dashboard"
         if finance_focus
@@ -335,17 +434,16 @@ def _student_project_queries(req: RetrievalQuery, focus_hint: str) -> list[str]:
     )
 
     return [
-        _join_parts(semantic_summary),
-        "student software engineering project architecture backend frontend database security",
-        _join_parts(implementation_summary, focus_hint),
-        "student project testing evaluation validation usability performance limitations",
+        _primary_anchor_query(req, focus_hint),
+        "student software engineering architecture implementation integration",
+        _join_parts(implementation_summary, kw_hint),
+        "student project testing security validation limitations",
         _join_parts(
-            "ai powered financial insights portfolio analytics sharpe ratio stock dashboard"
+            "portfolio analytics stock dashboard financial metrics"
             if finance_focus
-            else "external api integration data flow technical quality analytics",
+            else "technical quality correctness modularity error handling maintainability",
         ),
-        "dissertation report academic quality objectives methodology discussion limitations",
-        "critical analysis source quality using evidence writing structure limitations",
+        "code review architecture testing security maintainability next steps",
     ]
 
 
@@ -354,7 +452,6 @@ def _professor_project_queries(req: RetrievalQuery, focus_hint: str) -> list[str
         req.query,
         ("stock", "portfolio", "finance", "financial", "trading", "sharpe", "dashboard", "analytics", "ai"),
     )
-    semantic_summary = _semantic_summary(req, focus_hint)
     implementation_summary = (
         "django stock portfolio management implementation analytics dashboard"
         if finance_focus
@@ -362,43 +459,74 @@ def _professor_project_queries(req: RetrievalQuery, focus_hint: str) -> list[str
     )
 
     return [
-        _join_parts(semantic_summary),
-        "project marking rubric moderation consistency technical implementation architecture security testing",
+        _primary_anchor_query(req, focus_hint),
+        "project rubric moderation technical quality architecture implementation",
         _join_parts(
-            "criterion level justification backend frontend database integration technical quality evaluation",
+            "criterion justification backend frontend database testing",
             implementation_summary,
         ),
-        "testing evidence validation usability performance limitations moderation risk",
+        "marking policy moderation consistency limitations evidence",
         _join_parts(
-            "financial analytics portfolio metrics sharpe ratio ai feature limitations"
+            "portfolio analytics metrics ai feature limitations"
             if finance_focus
-            else "data quality external api integration analytics feature limitations",
+            else "integration quality testing evidence usability limitations",
         ),
-        "feedback wording academic quality dissertation objectives methodology discussion limitations",
     ]
 
 
 def _student_academic_queries(req: RetrievalQuery, focus_hint: str) -> list[str]:
-    semantic_summary = _semantic_summary(req, focus_hint)
     return [
-        _join_parts(semantic_summary),
-        "student academic submission structure coherence argument evidence",
-        "critical analysis depth reasoning methodology discussion limitations",
-        "academic writing clarity paragraphing tone precision",
-        "citation referencing attribution source use academic integrity",
-        "essay report objectives methodology discussion conclusion",
+        _primary_anchor_query(req, focus_hint),
+        "student academic writing structure argument evidence",
+        "critical analysis comparison reasoning methodology",
+        "citation referencing attribution academic integrity",
+        "clarity coherence paragraphing conclusion revision advice",
     ]
 
 
 def _professor_academic_queries(req: RetrievalQuery, focus_hint: str) -> list[str]:
-    semantic_summary = _semantic_summary(req, focus_hint)
     return [
-        _join_parts(semantic_summary),
+        _primary_anchor_query(req, focus_hint),
         "rubric marking policy moderation academic writing structure evidence",
         "criterion band descriptor critical analysis source use clarity",
         "feedback wording moderation safety consistency defensible judgement",
         "referencing academic quality methodology discussion limitations",
     ]
+
+
+def _expand_from_submission_context(req: RetrievalQuery) -> list[str]:
+    """Generate submission-specific query variants from text_excerpt and keywords.
+
+    This is the primary mechanism for topic-specific retrieval: when the caller
+    passes extracted submission keywords or a text excerpt, we build focused
+    queries from them instead of (or in addition to) generic base queries.
+    """
+    if not req.keywords and not req.text_excerpt:
+        return []
+
+    extras: list[str] = []
+
+    if req.title_hint:
+        title_terms = _focus_terms_from_text(req.title_hint, req.audience)
+        title_str = _join_parts(_mode_hint(req), " ".join(title_terms[:4]))
+        if title_str:
+            extras.append(title_str)
+
+    # Keyword-focused query: most submission-specific signal available
+    if req.keywords:
+        kw_str = _join_parts(" ".join(req.keywords[:12]))
+        if kw_str:
+            extras.append(kw_str)
+
+    # Excerpt-focused query: extract meaningful terms from the raw excerpt
+    if req.text_excerpt:
+        excerpt_terms = _focus_terms_from_text(req.text_excerpt, req.audience)
+        if excerpt_terms:
+            excerpt_str = _join_parts(" ".join(excerpt_terms[:8]))
+            if excerpt_str:
+                extras.append(excerpt_str)
+
+    return extras
 
 
 def _expand_from_ml_signals(audience: str, ml_signals: dict[str, Any]) -> list[str]:
@@ -534,10 +662,20 @@ def build_queries(req: RetrievalQuery) -> list[str]:
     for extra in _expand_from_detected_topic(req):
         queries.append(_join_parts(extra, focus_hint))
 
-    for extra in _expand_from_query_terms(req.audience, req.query):
+    combined_hint_text = " ".join(
+        part
+        for part in [req.query, req.title_hint or "", req.text_excerpt or ""]
+        if part
+    )
+    for extra in _expand_from_query_terms(req.audience, combined_hint_text):
         queries.append(_join_parts(extra, focus_hint))
 
     for extra in _expand_from_ml_signals(req.audience, req.ml_signals):
         queries.append(_join_parts(extra, focus_hint))
+
+    # Submission-context expansion: prepend so submission-specific queries
+    # survive the _MAX_QUERY_COUNT=7 cap before the generic base queries.
+    submission_extras = _expand_from_submission_context(req)
+    queries = submission_extras + queries
 
     return dedupe_queries(queries)[:_MAX_QUERY_COUNT]

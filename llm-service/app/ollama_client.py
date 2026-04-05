@@ -1,14 +1,24 @@
 import json
+import logging
 import httpx
 from typing import Any, Dict, Mapping, Optional, Union
 
 from app.config import settings
 
+logger = logging.getLogger("llm_service.ollama_client")
+
 OLLAMA_URL = str(settings.ollama_base_url or "http://host.docker.internal:11434").rstrip("/")
 OLLAMA_TIMEOUT_S = float(settings.timeout_seconds or 180)
-OLLAMA_PRIMARY_MODEL = str(settings.primary_model or "gemma3:latest")
-OLLAMA_FALLBACK_MODEL = str(settings.fallback_model or "mistral:latest")
+OLLAMA_PRIMARY_MODEL = str(settings.primary_model or "mistral:latest")
+OLLAMA_FALLBACK_MODEL = str(settings.fallback_model or OLLAMA_PRIMARY_MODEL)
 OLLAMA_OPTIONS_JSON = str(settings.ollama_options_json or "").strip()
+
+logger.info(
+    "ollama client configured primary=%s fallback=%s base_url=%s",
+    OLLAMA_PRIMARY_MODEL,
+    OLLAMA_FALLBACK_MODEL,
+    OLLAMA_URL,
+)
 
 
 def _err(e: Exception) -> str:

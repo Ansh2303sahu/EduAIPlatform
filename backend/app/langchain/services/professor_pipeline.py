@@ -54,6 +54,7 @@ from app.langchain.services.retrieval_packager import (
     pack_professor_rag,
     package_retrieval_chunks,
     package_retrieval_payload,
+    summarize_rag_trace,
 )
 from app.rag.store import build_storage_fields_from_rag_meta
 
@@ -135,6 +136,11 @@ class ProfessorPipeline:
             weak_retrieval=False,
             low_confidence=False,
         )
+        execution_logger.bind_context(
+            chain_name="phase10_professor_generation",
+            analysis_type=ctx.analysis_type.value,
+            submission_kind=ctx.submission_kind,
+        )
 
         t_ml = time.perf_counter()
         ctx.ml_result = normalize_professor_ml_context(ml_dict)
@@ -156,6 +162,25 @@ class ProfessorPipeline:
         ctx.timings_ms["rag"] = int((time.perf_counter() - t_rag) * 1000)
 
         retrieval_weak = _is_retrieval_weak(ctx.rag)
+        retrieval_debug = _build_retrieval_debug(ctx.rag)
+        execution_logger.set_retrieval_summary(
+            retrieval_mode=str(retrieval_debug.get("mode") or ""),
+            query_summary=str(retrieval_debug.get("query") or ""),
+            title_hint=str(retrieval_debug.get("title_hint") or ""),
+            retrieved_doc_count=int(retrieval_debug.get("chunk_count") or 0),
+            selected_doc_titles=list(retrieval_debug.get("selected_titles") or []),
+            selected_categories=list(retrieval_debug.get("final_categories") or []),
+            degraded_retrieval_mode=bool(retrieval_debug.get("degraded_input", False)),
+        )
+        logger.info(
+            "phase10 professor retrieval request_id=%s mode=%s weak=%s chunks=%s categories=%s titles=%s",
+            request_id,
+            retrieval_debug.get("mode") or "unset",
+            retrieval_weak,
+            retrieval_debug.get("chunk_count", 0),
+            retrieval_debug.get("final_categories", []),
+            retrieval_debug.get("selected_titles", []),
+        )
         if phase10_settings.enable_safe_mode and (retrieval_weak or low_confidence or injected):
             ctx.mode = PipelineMode.RESTRICTED
             ctx.execution_mode = execution_mode_from_pipeline_mode(ctx.mode)
@@ -184,7 +209,19 @@ class ProfessorPipeline:
 
         t_prompt = time.perf_counter()
         ctx.prompt_text = self._build_prompt(ctx)
+        ctx.prompt_meta = _build_prompt_meta(ctx)
         ctx.timings_ms["prompt"] = int((time.perf_counter() - t_prompt) * 1000)
+        execution_logger.set_prompt_metrics(
+            prompt_text=ctx.prompt_text,
+            prompt_trimmed=bool(ctx.prompt_meta.get("trimmed", False)),
+        )
+        logger.info(
+            "phase10 professor prompt request_id=%s chars=%s trimmed=%s retrieval_chars=%s",
+            request_id,
+            ctx.prompt_meta.get("prompt_chars", len(ctx.prompt_text)),
+            ctx.prompt_meta.get("trimmed", False),
+            ctx.prompt_meta.get("retrieval_context_chars", 0),
+        )
 
         t_gen = time.perf_counter()
         raw_text, model_used, model_error = await self._generate(ctx, execution_logger)
@@ -431,7 +468,7 @@ class ProfessorPipeline:
             "ingestion": ctx.ingestion.model_dump(),
             "ml": ctx.ml_raw,
             "query": _derive_query(ctx),
-            "top_k": 6 if ctx.submission_kind == "project" else 5,
+            "top_k": phase10_settings.retrieval_top_k_for("professor", ctx.submission_kind),
             "mode": ctx.mode.value,
             "analysis_type": ctx.analysis_type.value,
             "analysis_focus": _analysis_focus(ctx.submission_kind),
@@ -592,9 +629,19 @@ def _analysis_focus(submission_kind: str) -> list[str]:
 
 
 def _derive_query(ctx: PipelineContext) -> str:
-    text = (ctx.ingestion.text_content or "")[:500]
-    prefix = "project" if ctx.submission_kind == "project" else "academic"
-    return f"{prefix} professor moderation review: {text[:200]}"
+    raw_text = " ".join(
+        part.strip()
+        for part in [
+            ctx.ingestion.text_content or "",
+            ctx.ingestion.ocr_text or "",
+        ]
+        if part and str(part).strip()
+    )
+    compact = " ".join(raw_text.split())
+    excerpt = compact[:180]
+    if ctx.submission_kind == "project":
+        return f"professor project moderation review {excerpt}".strip()
+    return f"professor academic moderation review {excerpt}".strip()
 
 
 def _is_low_confidence(ctx: PipelineContext) -> bool:
@@ -627,6 +674,60 @@ def _build_rag_meta(rag: RagContext) -> dict[str, Any]:
         "citations": list(getattr(rag, "citations", []) or []),
         "retrieved_chunks": list(getattr(rag, "retrieved_chunks", []) or []),
         "trace": dict(getattr(rag, "trace", {}) or {}),
+    }
+
+
+def _build_retrieval_debug(rag: RagContext) -> dict[str, Any]:
+    trace_summary = summarize_rag_trace(getattr(rag, "trace", {}) or {})
+    return {
+        "query": trace_summary.get("query", ""),
+        "mode": trace_summary.get("mode", ""),
+        "title_hint": trace_summary.get("title_hint", ""),
+        "keywords_used": list(trace_summary.get("keywords_used") or []),
+        "selected_titles": list(trace_summary.get("selected_titles") or []),
+        "final_categories": list(trace_summary.get("final_categories") or []),
+        "applied_filters": dict(trace_summary.get("applied_filters") or {}),
+        "initial_candidate_count": _coerce_int(trace_summary.get("initial_candidate_count"), default=0),
+        "degraded_input": bool(trace_summary.get("degraded_input", False)),
+        "reranking_changed_order": bool(trace_summary.get("reranking_changed_order", False)),
+        "packaging_trimmed": bool(trace_summary.get("packaging_trimmed", False)),
+        "chunk_count": _coerce_int(getattr(rag, "chunk_count", 0), default=0),
+        "weak_retrieval": _bool_attr(rag, "weak_retrieval"),
+        "safe_review": _bool_attr(rag, "safe_review"),
+        "confidence_score": _coerce_float(getattr(rag, "confidence_score", 0.0), default=0.0),
+        "confidence_label": str(getattr(rag, "confidence_label", "low") or "low"),
+    }
+
+
+def _build_prompt_meta(ctx: PipelineContext) -> dict[str, Any]:
+    text_chars = len(ctx.ingestion.text_content or "")
+    ocr_chars = len(ctx.ingestion.ocr_text or "")
+    transcript_chars = len(ctx.ingestion.audio_transcript or "")
+    table_chars = len(str(ctx.ingestion.tables_json or ""))
+    retrieval_chars = len(ctx.rag.context or ctx.rag.context_text or "")
+    retrieval_debug = _build_retrieval_debug(ctx.rag)
+
+    submission_trimmed = bool(
+        text_chars > phase10_settings.prompt_submission_text_chars
+        or ocr_chars > phase10_settings.prompt_ocr_chars
+        or transcript_chars > phase10_settings.prompt_transcript_chars
+        or table_chars > phase10_settings.prompt_table_chars
+    )
+    retrieval_trimmed = bool(
+        retrieval_debug.get("packaging_trimmed", False)
+        or retrieval_chars > phase10_settings.prompt_rag_context_chars
+    )
+
+    return {
+        "prompt_chars": len(ctx.prompt_text or ""),
+        "trimmed": bool(submission_trimmed or retrieval_trimmed),
+        "submission_trimmed": submission_trimmed,
+        "retrieval_trimmed": retrieval_trimmed,
+        "submission_text_chars": text_chars,
+        "ocr_chars": ocr_chars,
+        "transcript_chars": transcript_chars,
+        "table_chars": table_chars,
+        "retrieval_context_chars": retrieval_chars,
     }
 
 
@@ -978,11 +1079,16 @@ def _build_execution_meta(
         decision_source=decision_source,
         role=ChainRole.PROFESSOR,
         chain_version=phase10_settings.chain_version,
+        chain_name="phase10_professor_generation",
         student_prompt_version=phase10_settings.student_prompt_version,
         professor_prompt_version=phase10_settings.professor_prompt_version,
         schema_version=phase10_settings.schema_version,
+        analysis_type=ctx.analysis_type.value,
+        submission_kind=ctx.submission_kind,
         timings_ms=dict(ctx.timings_ms),
         agreement_score=agreement_score,
+        retrieval_debug=_build_retrieval_debug(ctx.rag),
+        prompt_debug=dict(ctx.prompt_meta),
     )
 
 

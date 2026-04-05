@@ -256,6 +256,10 @@ async def run_with_fallback(
         if execution_logger is not None:
             execution_logger.mark_retry()
             execution_logger.mark_fallback_triggered(_infer_chain_failure_reason(exc))
+        if phase10_settings.llm_fallback_label.strip() == phase10_settings.llm_primary_label.strip():
+            raise RuntimeError(
+                f"No distinct fallback model is configured after primary failure: {exc}"
+            ) from exc
 
     try:
         fallback_model = get_fallback_model(role=role)
@@ -286,6 +290,13 @@ async def run_repair_with_fallback(
 
     Returns the last raw string whether or not it became valid JSON.
     """
+    if phase10_settings.llm_fallback_label.strip() == phase10_settings.llm_primary_label.strip():
+        logger.info(
+            "phase10 json_repair skipped request_id=%s because no distinct fallback model is configured",
+            request_id,
+        )
+        return raw_bad_output
+
     repair_prompt_text = build_repair_prompt(raw_bad_output, target)
     role = "professor" if "professor" in str(target).lower() else "student"
     fallback_model = get_fallback_model(role=role)

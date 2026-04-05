@@ -7,6 +7,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+import httpx
 
 from app.langchain.config import phase10_settings
 from app.langchain.services.chain_factory import (
@@ -67,6 +68,7 @@ async def test_student_generation_chain_uses_llm_service_proxy(monkeypatch: pyte
     assert sink["json"]["role"] == "student"
     assert sink["json"]["temperature"] == phase10_settings.student_temperature
     assert sink["json"]["requested_model"] == phase10_settings.primary_model
+    assert sink["json"]["options"]["num_predict"] == phase10_settings.student_max_output_tokens
     assert sink["headers"]["x-ai-secret"]
 
 
@@ -86,6 +88,39 @@ async def test_professor_generation_chain_applies_professor_temperature(monkeypa
     assert sink["json"]["role"] == "professor"
     assert sink["json"]["temperature"] == phase10_settings.professor_temperature
     assert sink["json"]["requested_model"] == phase10_settings.fallback_model
+    assert sink["json"]["options"]["num_predict"] == phase10_settings.professor_max_output_tokens
+
+
+class _TimeoutAsyncClient:
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+    async def __aenter__(self) -> "_TimeoutAsyncClient":
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        return None
+
+    async def post(self, url: str, *, json: dict[str, Any], headers: dict[str, str]):
+        raise httpx.ReadTimeout("", request=httpx.Request("POST", url))
+
+
+@pytest.mark.asyncio
+async def test_generation_chain_surfaces_descriptive_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("app.langchain.services.chain_factory.settings.llm_service_secret", "test-secret")
+    monkeypatch.setattr(
+        "app.langchain.services.chain_factory.httpx.AsyncClient",
+        lambda *args, **kwargs: _TimeoutAsyncClient(*args, **kwargs),
+    )
+
+    chain = build_generation_chain(build_student_model())
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await chain.ainvoke({"prompt_text": "student prompt"})
+
+    message = str(excinfo.value)
+    assert "llm-service generate timeout" in message
+    assert "role=student" in message
 
 
 def test_build_chain_execution_config_includes_versions() -> None:

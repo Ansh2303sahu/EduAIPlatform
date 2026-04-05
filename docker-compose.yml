@@ -20,7 +20,7 @@ services:
 
       LLM_SERVICE_URL: http://llm-service:8030
       LLM_SERVICE_SECRET: dev_llm_secret
-      LLM_PRIMARY_LABEL: ${LLM_PRIMARY_LABEL:-gemma3:latest}
+      LLM_PRIMARY_LABEL: ${LLM_PRIMARY_LABEL:-mistral:latest}
       LLM_FALLBACK_LABEL: ${LLM_FALLBACK_LABEL:-mistral:latest}
     depends_on:
       - clamav
@@ -69,7 +69,7 @@ services:
 
       LLM_SERVICE_URL: http://llm-service:8030
       LLM_SERVICE_SECRET: dev_llm_secret
-      LLM_PRIMARY_LABEL: ${LLM_PRIMARY_LABEL:-gemma3:latest}
+      LLM_PRIMARY_LABEL: ${LLM_PRIMARY_LABEL:-mistral:latest}
       LLM_FALLBACK_LABEL: ${LLM_FALLBACK_LABEL:-mistral:latest}
 
       SIGNED_URL_EXPIRES_SECONDS: "60"
@@ -118,7 +118,7 @@ services:
 
       LLM_SERVICE_URL: http://llm-service:8030
       LLM_SERVICE_SECRET: dev_llm_secret
-      LLM_PRIMARY_LABEL: ${LLM_PRIMARY_LABEL:-gemma3:latest}
+      LLM_PRIMARY_LABEL: ${LLM_PRIMARY_LABEL:-mistral:latest}
       LLM_FALLBACK_LABEL: ${LLM_FALLBACK_LABEL:-mistral:latest}
 
       SIGNED_URL_EXPIRES_SECONDS: "60"
@@ -174,7 +174,7 @@ services:
 
       LLM_SERVICE_URL: http://llm-service:8030
       LLM_SERVICE_SECRET: dev_llm_secret
-      LLM_PRIMARY_LABEL: ${LLM_PRIMARY_LABEL:-gemma3:latest}
+      LLM_PRIMARY_LABEL: ${LLM_PRIMARY_LABEL:-mistral:latest}
       LLM_FALLBACK_LABEL: ${LLM_FALLBACK_LABEL:-mistral:latest}
 
       SIGNED_URL_EXPIRES_SECONDS: "60"
@@ -289,7 +289,7 @@ services:
 
       # --- Ollama (used when LLM_PROVIDER=ollama) ---
       OLLAMA_BASE_URL: "http://host.docker.internal:11434"
-      OLLAMA_PRIMARY_MODEL: "gemma3:latest"
+      OLLAMA_PRIMARY_MODEL: "mistral:latest"
       OLLAMA_FALLBACK_MODEL: "mistral:latest"
       # Stable structured-output settings: low temp, enough tokens, controlled sampling
       OLLAMA_OPTIONS_JSON: '{"num_predict": 4096, "temperature": 0.1, "top_p": 0.9, "top_k": 40, "repeat_penalty": 1.1}'

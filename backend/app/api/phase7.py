@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 import time
 import uuid
 from typing import Any, Dict, Literal, Tuple
@@ -305,6 +306,141 @@ def _phase7_text(value: Any, default: str, *, limit: int) -> str:
     return text[:limit]
 
 
+_STUDENT_PLACEHOLDER_SUMMARY = "Automated review generated with limited confidence."
+_NOT_ASSESSED_PLACEHOLDER = "Not assessed."
+_LOW_CONTENT_QUALITY_REASON = "low_content_quality"
+
+
+def _phase7_marker_text(value: Any) -> str:
+    text = value if isinstance(value, str) else str(value or "")
+    return re.sub(r"\s+", " ", text.strip()).casefold().rstrip(".!?")
+
+
+def _is_student_placeholder_summary(value: Any) -> bool:
+    normalized = _phase7_marker_text(value)
+    placeholder = _phase7_marker_text(_STUDENT_PLACEHOLDER_SUMMARY)
+    return normalized == placeholder or (
+        "automated review generated" in normalized
+        and "limited confidence" in normalized
+    )
+
+
+def _is_not_assessed_placeholder(value: Any) -> bool:
+    return _phase7_marker_text(value) == _phase7_marker_text(_NOT_ASSESSED_PLACEHOLDER)
+
+
+def _student_report_low_content_quality(report: dict[str, Any] | None) -> bool:
+    data = _phase7_as_dict(report)
+    if not data:
+        return False
+
+    safety = _phase7_as_dict(data.get("safety"))
+    if _phase7_marker_text(safety.get("reason")) == _LOW_CONTENT_QUALITY_REASON:
+        return True
+
+    summary_is_placeholder = _is_student_placeholder_summary(data.get("summary"))
+    lists_are_empty = all(
+        len(_phase7_as_list(data.get(key))) == 0
+        for key in ("issues", "strengths", "improvement_plan", "checklist")
+    )
+
+    architecture_review = _phase7_as_dict(data.get("architecture_review"))
+    implementation_review = _phase7_as_dict(data.get("implementation_review"))
+    evaluation_review = _phase7_as_dict(data.get("evaluation_review"))
+
+    architecture_is_placeholder = all(
+        _is_not_assessed_placeholder(architecture_review.get(key))
+        for key in ("overview", "backend", "frontend", "database", "security")
+    )
+    implementation_is_placeholder = (
+        len(_phase7_as_list(implementation_review.get("features_built"))) == 0
+        and _is_not_assessed_placeholder(implementation_review.get("technical_quality"))
+        and _is_not_assessed_placeholder(implementation_review.get("integration_quality"))
+    )
+    evaluation_is_placeholder = all(
+        _is_not_assessed_placeholder(evaluation_review.get(key))
+        for key in ("testing_present", "limitations", "academic_quality")
+    )
+
+    return (
+        summary_is_placeholder
+        and lists_are_empty
+        and architecture_is_placeholder
+        and implementation_is_placeholder
+        and evaluation_is_placeholder
+    )
+
+
+def _apply_student_quality_gate(report: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    degraded = _student_report_low_content_quality(report)
+    if not degraded:
+        return report, False
+
+    validated = _phase7_as_dict(report).copy()
+    safety = _phase7_as_dict(validated.get("safety")).copy()
+    confidence = _phase7_as_dict(validated.get("confidence")).copy()
+    safety["needs_review"] = True
+    safety["reason"] = _LOW_CONTENT_QUALITY_REASON
+    confidence["overall"] = min(
+        _phase7_float(confidence.get("overall"), default=0.35),
+        0.35,
+    )
+    validated["safety"] = safety
+    validated["confidence"] = confidence
+    return validated, True
+
+
+def _student_row_is_degraded_placeholder(row: dict[str, Any] | None) -> bool:
+    data = _phase7_as_dict(row)
+    if not data:
+        return False
+
+    model_versions = _phase7_as_dict(data.get("model_versions"))
+    quality_gate = _phase7_as_dict(model_versions.get("quality_gate"))
+    if _phase7_bool(quality_gate.get("degraded_placeholder"), default=False):
+        return True
+
+    report = _phase7_as_dict(data.get("report_json"))
+    safety = _phase7_as_dict(report.get("safety"))
+    safety_reason = _phase7_marker_text(safety.get("reason"))
+    if safety_reason == _LOW_CONTENT_QUALITY_REASON:
+        return True
+
+    return bool(_phase7_bool(data.get("needs_review"), default=False) and safety_reason == _LOW_CONTENT_QUALITY_REASON)
+
+
+def _select_latest_student_row(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not rows:
+        return None
+    for row in rows:
+        if not _student_row_is_degraded_placeholder(row):
+            return row
+    return rows[0]
+
+
+def _select_latest_student_row_with_metadata(
+    rows: list[dict[str, Any]],
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    total = len(rows)
+    if total == 0:
+        return None, {
+            "preferred_non_degraded": False,
+            "total_reports_considered": 0,
+        }
+
+    selected = _select_latest_student_row(rows)
+    preferred_non_degraded = bool(
+        selected
+        and selected is not rows[0]
+        and not _student_row_is_degraded_placeholder(selected)
+        and _student_row_is_degraded_placeholder(rows[0])
+    )
+    return selected, {
+        "preferred_non_degraded": preferred_non_degraded,
+        "total_reports_considered": total,
+    }
+
+
 def _phase7_bool(value: Any, default: bool = False) -> bool:
     if isinstance(value, bool):
         return value
@@ -557,24 +693,42 @@ def _detect_submission_kind(ingestion: dict[str, Any]) -> str:
     return _shared_detect_submission_kind(ingestion)
 
 
+def _submission_focused_query(ingestion: dict[str, Any], base: str, limit: int = 200) -> str:
+    """Build a query anchored to submission content rather than the generic base alone.
+
+    Strategy: take the first ~200 chars of the submission text, extract only the
+    terms that are already meaningful in the RAG keyword vocabulary (project or
+    essay terms), and prepend them so the retriever's multi-query expansion sees
+    them in slot 0 — the most specific query — before falling back to generic
+    category templates.
+    """
+    text = " ".join((ingestion.get("text_content") or "").split())
+    if not text:
+        return base
+    # Use only the first 200 chars as the primary anchor — long excerpts get
+    # silently clipped to 320 chars in query_builder and lose submission signal.
+    excerpt = text[:limit]
+    return excerpt
+
+
 def _student_project_query(ingestion: dict[str, Any]) -> str:
-    base = (
-        "student software engineering project evaluation architecture backend frontend "
-        "database schema authentication authorization security testing evaluation "
-        "external api integration data flow analytics ai features limitations future improvements "
-        "portfolio metrics dashboards implementation quality"
+    return _submission_focused_query(
+        ingestion,
+        base=(
+            "student software engineering project architecture backend frontend "
+            "database security testing implementation quality"
+        ),
     )
-    excerpt = _normalized_excerpt(ingestion.get("text_content"))
-    return f"{base} {excerpt}".strip() if excerpt else base
 
 
 def _student_academic_query(ingestion: dict[str, Any]) -> str:
-    base = (
-        "student academic feedback structure argument evidence critical analysis "
-        "clarity coherence referencing citation academic writing methodology source quality evaluation"
+    return _submission_focused_query(
+        ingestion,
+        base=(
+            "student academic writing structure argument evidence "
+            "critical analysis clarity referencing citation"
+        ),
     )
-    excerpt = _normalized_excerpt(ingestion.get("text_content"))
-    return f"{base} {excerpt}".strip() if excerpt else base
 
 
 def _professor_project_query(ingestion: dict[str, Any]) -> str:
@@ -955,16 +1109,18 @@ def _validate_student_report_for_storage(
 ) -> tuple[dict[str, Any], bool]:
     try:
         validated = _StoredStudentReport.model_validate(report or {}).model_dump()
+        validated, degraded = _apply_student_quality_gate(validated)
         if restricted:
             validated["confidence"]["mode"] = "restricted"
             validated["safety"]["needs_review"] = True
             validated["confidence"]["overall"] = min(validated["confidence"].get("overall", 0.0), 0.35)
-        return validated, bool(report)
+        return validated, bool(report) and not degraded
     except ValidationError:
         try:
             validated = _StoredStudentReport.model_validate(
                 _canonical_student_report(report, restricted=restricted)
             ).model_dump()
+            validated, _ = _apply_student_quality_gate(validated)
             return validated, False
         except ValidationError:
             fallback = _StoredStudentReport.model_validate(
@@ -1123,7 +1279,7 @@ def _require_llm() -> None:
         raise HTTPException(status_code=500, detail="LLM_SERVICE_SECRET not set")
 
 
-async def _call_llm(endpoint: str, payload: dict[str, Any]) -> Tuple[dict[str, Any], str]:
+async def _call_llm(endpoint: str, payload: dict[str, Any]) -> Tuple[dict[str, Any], str, dict[str, str]]:
     _require_llm()
 
     try:
@@ -1140,7 +1296,11 @@ async def _call_llm(endpoint: str, payload: dict[str, Any]) -> Tuple[dict[str, A
         raise HTTPException(status_code=502, detail=f"llm-service failed: {r.text}")
 
     model_used = r.headers.get("x-llm-model-used", "") or ""
-    return r.json(), model_used
+    llm_meta = {
+        "primary_model": r.headers.get("x-llm-primary-model", "") or "",
+        "fallback_model": r.headers.get("x-llm-fallback-model", "") or "",
+    }
+    return r.json(), model_used, llm_meta
 
 
 # -------------------------
@@ -1158,11 +1318,38 @@ async def latest(role: str, file_id: str, user: CurrentUser = Depends(get_curren
 
     await _load_file(file_id, user)
 
-    rows = await _get_rows(
-        f"ai_reports?file_id=eq.{file_id}&role=eq.{role}&select=*&order=created_at.desc&limit=1"
-    )
-    item = _normalize_report_row(role, rows[0]) if rows else None
-    return {"found": bool(rows), "item": item}
+    if role == "student":
+        rows = await _get_rows(
+            f"ai_reports?file_id=eq.{file_id}&role=eq.{role}&select=*&order=created_at.desc"
+        )
+        selected, selection_metadata = _select_latest_student_row_with_metadata(rows)
+        skipped_degraded = 0
+        if selected is not None:
+            for row in rows:
+                if row is selected:
+                    break
+                if _student_row_is_degraded_placeholder(row):
+                    skipped_degraded += 1
+        logger.info(
+            "latest_student_selection file_id=%s total=%s selected_non_degraded=%s skipped_degraded=%s selected_report_id=%s",
+            file_id,
+            selection_metadata["total_reports_considered"],
+            selection_metadata["preferred_non_degraded"],
+            skipped_degraded,
+            (selected or {}).get("id"),
+        )
+    else:
+        rows = await _get_rows(
+            f"ai_reports?file_id=eq.{file_id}&role=eq.{role}&select=*&order=created_at.desc&limit=1"
+        )
+        selected = rows[0] if rows else None
+        selection_metadata = None
+
+    item = _normalize_report_row(role, selected) if selected else None
+    response = {"found": bool(rows), "item": item}
+    if selection_metadata is not None:
+        response["selection_metadata"] = selection_metadata
+    return response
 
 
 @router.post("/student/generate")
@@ -1287,7 +1474,7 @@ async def generate_student(body: GenerateIn, user: CurrentUser = Depends(get_cur
         )
 
     t2 = time.perf_counter()
-    llm_response, llm_model_used = await _call_llm("/llm/student/report", llm_payload)
+    llm_response, llm_model_used, llm_meta = await _call_llm("/llm/student/report", llm_payload)
     llm_ms = int((time.perf_counter() - t2) * 1000)
 
     rag_meta = _extract_rag_meta(llm_response)
@@ -1297,6 +1484,7 @@ async def generate_student(body: GenerateIn, user: CurrentUser = Depends(get_cur
         ml=ml,
         reason="The LLM output did not match the expected student report schema.",
     )
+    degraded_placeholder = _student_report_low_content_quality(report)
 
     total_ms = int((time.perf_counter() - t_all) * 1000)
     agreement = _agreement_score_student(int(ml["confidence_0_to_4"]), injected, llm_ok)
@@ -1319,8 +1507,8 @@ async def generate_student(body: GenerateIn, user: CurrentUser = Depends(get_cur
                     "llm_service": llm_ms,
                     "total": total_ms,
                 },
-                "llm_primary": settings.llm_primary_label,
-                "llm_fallback": settings.llm_fallback_label,
+                "llm_primary": llm_meta.get("primary_model") or settings.llm_primary_label,
+                "llm_fallback": llm_meta.get("fallback_model") or settings.llm_fallback_label,
                 "llm_model_used": llm_model_used or "unknown",
                 "ml_models": {
                     "feedback": "student.feedback_classifier_multimodal.v1",
@@ -1330,6 +1518,10 @@ async def generate_student(body: GenerateIn, user: CurrentUser = Depends(get_cur
                     "final_confidence": agreement,
                     "ml_bucket_0_to_4": ml["confidence_0_to_4"],
                     "injected": injected,
+                },
+                "quality_gate": {
+                    "degraded_placeholder": degraded_placeholder,
+                    "reason": _LOW_CONTENT_QUALITY_REASON if degraded_placeholder else "",
                 },
             },
             **build_storage_fields_from_rag_meta(rag_meta),
@@ -1470,7 +1662,7 @@ async def generate_professor(body: GenerateIn, user: CurrentUser = Depends(get_c
         )
 
     t2 = time.perf_counter()
-    llm_response, llm_model_used = await _call_llm("/llm/professor/report", llm_payload)
+    llm_response, llm_model_used, llm_meta = await _call_llm("/llm/professor/report", llm_payload)
     llm_ms = int((time.perf_counter() - t2) * 1000)
 
     rag_meta = _extract_rag_meta(llm_response)
@@ -1502,8 +1694,8 @@ async def generate_professor(body: GenerateIn, user: CurrentUser = Depends(get_c
                     "llm_service": llm_ms,
                     "total": total_ms,
                 },
-                "llm_primary": settings.llm_primary_label,
-                "llm_fallback": settings.llm_fallback_label,
+                "llm_primary": llm_meta.get("primary_model") or settings.llm_primary_label,
+                "llm_fallback": llm_meta.get("fallback_model") or settings.llm_fallback_label,
                 "llm_model_used": llm_model_used or "unknown",
                 "ml_models": {"rubric_suite": "professor.rubric_suite_multimodal.v1"},
                 "agreement": {

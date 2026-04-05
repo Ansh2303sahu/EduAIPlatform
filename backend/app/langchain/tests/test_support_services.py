@@ -4,6 +4,9 @@ Tests for prompt sanitization, ML context normalization, and retrieval packaging
 
 from __future__ import annotations
 
+import pytest
+
+from app.langchain.config import phase10_settings
 from app.langchain.services.ml_context_builder import (
     normalize_professor_ml_context,
     normalize_student_ml_context,
@@ -264,3 +267,53 @@ def test_package_retrieval_chunks_respects_char_budget_with_truncation() -> None
     assert len(packaged["context_text"]) <= 650
     assert packaged["chunk_count"] == 1
     assert packaged["retrieved_chunks"][0]["chunk_id"] == "long-1"
+    assert packaged["trace"]["packaging_trimmed"] is True
+
+
+def test_package_retrieval_chunks_filters_inactive_chunks() -> None:
+    packaged = package_retrieval_chunks(
+        role="student",
+        retrieved_chunks=[
+            {
+                "chunk_id": "active-1",
+                "document_id": "doc-1",
+                "document_title": "Active Guide",
+                "section": "Relevant",
+                "category": "writing",
+                "audience": "student",
+                "content": "Use clear argument structure and direct evidence.",
+                "score": 0.9,
+                "metadata": {"status": "active"},
+            },
+            {
+                "chunk_id": "inactive-1",
+                "document_id": "doc-2",
+                "document_title": "Old Guide",
+                "section": "Deprecated",
+                "category": "writing",
+                "audience": "student",
+                "content": "Outdated content should not appear.",
+                "score": 0.95,
+                "metadata": {"status": "inactive"},
+            },
+        ],
+        confidence_label="high",
+        safe_review=False,
+        max_chars=1200,
+    )
+
+    assert packaged["chunk_count"] == 1
+    assert packaged["retrieved_chunks"][0]["chunk_id"] == "active-1"
+    assert "Outdated content" not in packaged["context_text"]
+
+
+def test_phase10_settings_role_specific_top_k(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(phase10_settings, "student_project_top_k", 9)
+    monkeypatch.setattr(phase10_settings, "student_academic_top_k", 5)
+    monkeypatch.setattr(phase10_settings, "professor_project_top_k", 7)
+    monkeypatch.setattr(phase10_settings, "professor_academic_top_k", 4)
+
+    assert phase10_settings.retrieval_top_k_for("student", "project") == 9
+    assert phase10_settings.retrieval_top_k_for("student", "academic") == 5
+    assert phase10_settings.retrieval_top_k_for("professor", "project") == 7
+    assert phase10_settings.retrieval_top_k_for("professor", "academic") == 4

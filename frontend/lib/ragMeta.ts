@@ -26,9 +26,24 @@ export type RagTrace = {
   query?: string;
   collection_name?: string;
   rewritten_queries?: string[];
+   expanded_queries?: string[];
   retrieved_chunk_ids?: string[];
   final_chunk_ids?: string[];
+  retrieved_titles?: string[];
+  selected_titles?: string[];
   scores?: number[];
+  applied_filters?: Record<string, unknown>;
+  final_categories?: string[];
+  reranking_changed_order?: boolean;
+  keywords_used?: string[];
+  text_excerpt?: string;
+  title_hint?: string;
+  mode?: string;
+  degraded_input?: boolean;
+  initial_candidate_count?: number;
+  confidence_score?: number;
+  confidence_label?: string;
+  eligibility_summary?: Record<string, unknown>;
 };
 
 export type RagMeta = {

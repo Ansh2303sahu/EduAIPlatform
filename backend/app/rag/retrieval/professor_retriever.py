@@ -16,6 +16,11 @@ def retrieve_professor_context(
     analysis_type: str | None = None,
     preferred_categories: list[str] | None = None,
     official_bias: float = 0.0,
+    text_excerpt: str | None = None,
+    keywords: list[str] | None = None,
+    title_hint: str | None = None,
+    mode: str | None = None,
+    degraded_input: bool = False,
 ) -> RetrievalResult:
     req = RetrievalQuery(
         audience="professor",
@@ -32,5 +37,10 @@ def retrieve_professor_context(
         analysis_type=analysis_type,
         preferred_categories=preferred_categories or [],
         official_bias=official_bias,
+        text_excerpt=text_excerpt,
+        keywords=keywords or [],
+        title_hint=title_hint,
+        mode=mode,
+        degraded_input=degraded_input,
     )
     return rag_retriever.retrieve(req)

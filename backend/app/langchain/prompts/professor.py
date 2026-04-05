@@ -16,7 +16,6 @@ from app.langchain.prompts.shared import (
     build_rag_section,
     build_shared_rules_section,
     build_submission_evidence_section,
-    build_submission_summary_section,
     build_weak_evidence_section,
     join_sections,
     render_bullets,
@@ -65,12 +64,18 @@ def _build_professor_prompt(ctx: PipelineContext, *, safe_mode: bool) -> str:
         build_weak_evidence_section(extra_lines=_professor_weak_evidence_lines(safe_mode)),
         _build_professor_evaluation_section(ctx),
         _build_professor_discrepancy_section(ctx, safe_mode=safe_mode),
-        build_submission_summary_section(ctx.ingestion, submission_kind=ctx.submission_kind),
-        build_submission_evidence_section(ctx.ingestion),
+        build_submission_evidence_section(
+            ctx.ingestion,
+            text_limit=1400,
+            ocr_limit=220,
+            transcript_limit=220,
+            table_limit=360,
+        ),
         build_ml_predictions_section(
             "PHASE 6 RUBRIC PREDICTIONS",
             ml_context_text=ctx.ml_context_text,
             ml_raw=ctx.ml_raw,
+            include_raw=False,
         ),
         build_rag_section(
             title="PROFESSOR RAG CONTEXT",
@@ -81,6 +86,11 @@ def _build_professor_prompt(ctx: PipelineContext, *, safe_mode: bool) -> str:
             confidence_label=ctx.rag.confidence_label,
             confidence_score=ctx.rag.confidence_score,
             safe_review=ctx.rag.safe_review,
+            trace=ctx.rag.trace,
+            context_limit=1400,
+            citation_limit=3,
+            chunk_preview_limit=2,
+            chunk_preview_chars=80,
         ),
         build_output_schema_section(
             "OUTPUT SCHEMA",
@@ -92,23 +102,37 @@ def _build_professor_prompt(ctx: PipelineContext, *, safe_mode: bool) -> str:
 
 
 def _build_professor_role_section(ctx: PipelineContext) -> str:
-    submission_label = "a software project" if ctx.submission_kind == "project" else "an academic submission"
+    mode = _professor_feedback_mode(ctx)
+    if mode == "project":
+        submission_label = "a software project"
+    else:
+        submission_label = "an academic submission"
+
     lines = [
         f"You are generating a professor-facing evaluation and moderation report for {submission_label}.",
         "Do not write as if a specific professor is directly addressing a specific student unless the evidence explicitly requires that framing.",
         "Produce an evidence-grounded platform report suitable for review, moderation, and audit.",
     ]
+    if mode in {"rubric", "policy", "moderation", "feedback"}:
+        lines.append(
+            "Prioritize rubric, policy, moderation consistency, and defensible assessment language over conversational feedback."
+        )
+    if mode == "project":
+        lines.append(
+            "Treat the submission like a technical assessment: evaluate architecture, implementation, testing, security, and evidence of quality."
+        )
     return render_bullets("ROLE", lines)
 
 
 def _build_professor_evaluation_section(ctx: PipelineContext) -> str:
+    mode = _professor_feedback_mode(ctx)
     lines = [
         "Rubric bands must be grounded in explicit evidence from the submission or approved retrieved guidance.",
         "Use Phase 6 rubric predictions as a prior signal, not as the final decision.",
         "feedback_explanation should explain the overall judgment in concise, evidence-based prose.",
         "moderation_notes should capture risks, edge cases, or evidence gaps that matter for human review.",
     ]
-    if ctx.submission_kind == "project":
+    if mode == "project" or ctx.submission_kind == "project":
         lines.extend(
             [
                 "Pay particular attention to technical implementation, architecture, testing, security, and evaluation quality.",
@@ -122,6 +146,10 @@ def _build_professor_evaluation_section(ctx: PipelineContext) -> str:
                 "Do not infer missing methodology, references, or analysis that is not present in the submission evidence.",
             ]
         )
+    if mode == "policy":
+        lines.append("Prefer policy-aligned wording and call out when the evidence is insufficient for a policy-safe judgement.")
+    elif mode == "feedback":
+        lines.append("Keep feedback_explanation precise and suitable for a feedback-template context, not a free-form essay response.")
     return render_bullets("EVIDENCE-GROUNDED EVALUATION", lines)
 
 
@@ -168,14 +196,21 @@ def _professor_weak_evidence_lines(safe_mode: bool) -> list[str]:
 
 
 def _professor_field_rules(ctx: PipelineContext, *, safe_mode: bool) -> list[str]:
+    mode = _professor_feedback_mode(ctx)
     rules = [
         "rubric_breakdown must be an array of at least 2 criterion rows covering the key assessed dimensions of the submission.",
-        "Every rubric_breakdown justification must reference concrete evidence from the submission or approved retrieved context — do not use generic placeholder justifications.",
+        "Every rubric_breakdown justification must reference concrete evidence from the submission or approved retrieved context - do not use generic placeholder justifications.",
         "feedback_explanation is required, must be at least 2 full sentences, and must ground its judgment in the submission evidence.",
         "moderation_notes must always be an array. Include at least 1 item identifying a risk, evidence gap, or edge case even when the overall report is safe.",
         "If rubric evidence is insufficient to support a criterion, state what is missing rather than awarding a confident band.",
         "safety.reason may be empty only when there is no meaningful review concern.",
     ]
+    if mode == "project" or ctx.submission_kind == "project":
+        rules.append("Use project-relevant criteria rather than essay-only criteria.")
+    else:
+        rules.append("Use academically relevant criteria rather than project-only criteria unless the evidence clearly supports them.")
+    if mode == "policy":
+        rules.append("When policy evidence is present, moderation_notes should clearly separate policy guidance from submission-specific evidence.")
     if safe_mode:
         rules.extend(
             [
@@ -185,12 +220,15 @@ def _professor_field_rules(ctx: PipelineContext, *, safe_mode: bool) -> list[str
         )
     else:
         rules.append("Only set safety.needs_review to true when there is a real evidence or moderation concern.")
-    if ctx.submission_kind == "project":
-        rules.append("Use project-relevant criteria rather than essay-only criteria.")
-    else:
-        rules.append("Use academically relevant criteria rather than project-only criteria unless the evidence clearly supports them.")
     return rules
 
 
 def _professor_requires_safe_mode(ctx: PipelineContext) -> bool:
     return getattr(ctx.mode, "value", str(ctx.mode)) == "restricted"
+
+
+def _professor_feedback_mode(ctx: PipelineContext) -> str:
+    trace_mode = str((ctx.rag.trace or {}).get("mode") or "").strip().lower()
+    if trace_mode in {"project", "rubric", "policy", "moderation", "feedback"}:
+        return trace_mode
+    return "project" if ctx.submission_kind == "project" else "rubric"

@@ -67,7 +67,7 @@ async def test_professor_pipeline_happy_path():
                 enabled=False, context="", instruction="",
                 citations=[], retrieved_chunks=[],
                 confidence_score=0.0, confidence_label="low",
-                safe_review=False, trace={},
+                safe_review=False, trace={"mode": "rubric", "selected_titles": ["Moderation Handbook"], "final_categories": ["rubrics"]},
             )),
         ),
         patch("app.langchain.services.professor_pipeline.get_primary_model", return_value=MagicMock()),
@@ -88,9 +88,13 @@ async def test_professor_pipeline_happy_path():
     assert result["model_used"] == "claude-sonnet-4-6"
     assert result["validation_status"]["valid"] is True
     assert result["execution_metadata"]["role"] == "professor"
+    assert result["execution_metadata"]["chain_name"] == "phase10_professor_generation"
+    assert result["execution_metadata"]["retrieval_mode"] == "rubric"
+    assert result["execution_metadata"]["selected_doc_titles"] == ["Moderation Handbook"]
     assert result["decision_source"] == "hybrid"
     assert result["storage_payload"]["role"] == "professor"
     assert result["discrepancy_flag"] is False
+    assert result["storage_payload"]["model_versions"]["retrieval_debug"]["mode"] == "rubric"
 
 
 @pytest.mark.asyncio
@@ -271,3 +275,42 @@ async def test_professor_pipeline_weak_retrieval_and_low_confidence_short_circui
     assert result["report"]["safety"]["needs_review"] is True
     assert result["moderation_checks"]["needs_review"] is True
     assert result["validation_status"]["stage"] == "retrieve"
+
+
+@pytest.mark.asyncio
+async def test_professor_pipeline_records_degraded_retrieval_mode():
+    with (
+        patch(
+            "app.langchain.services.professor_pipeline.run_with_fallback",
+            new_callable=AsyncMock,
+            return_value=(VALID_PROFESSOR_REPORT, "mistral"),
+        ),
+        patch(
+            "app.langchain.services.professor_pipeline.pack_professor_rag",
+            return_value=(SAMPLE_INGESTION, MagicMock(
+                enabled=True,
+                context="Policy guidance " * 100,
+                instruction="Use moderation guidance conservatively.",
+                citations=[],
+                retrieved_chunks=[],
+                confidence_score=0.61,
+                confidence_label="medium",
+                safe_review=False,
+                weak_retrieval=False,
+                trace={"mode": "policy", "degraded_input": True},
+            )),
+        ),
+        patch("app.langchain.services.professor_pipeline.get_primary_model", return_value=MagicMock()),
+        patch("app.langchain.services.professor_pipeline.build_generation_chain", return_value=MagicMock()),
+    ):
+        pipeline = ProfessorPipeline()
+        result = await pipeline.run(
+            file_id="file-p6",
+            submission_id="sub-p6",
+            ingestion_dict={"text_content": "", "ocr_text": "", "audio_transcript": "", "tables_json": None},
+            ml_dict=SAMPLE_ML,
+            submission_kind="academic",
+        )
+
+    assert result["execution_metadata"]["retrieval_mode"] == "policy"
+    assert result["execution_metadata"]["degraded_retrieval_mode"] is True

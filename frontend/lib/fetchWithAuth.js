@@ -49,6 +49,29 @@ export async function fetchWithAuth(url, options = {}, config = {}) {
         signal: controller.signal,
         cache: "no-store",
       });
+    } catch (error) {
+      const isAbort = error?.name === "AbortError";
+      const rawMessage =
+        typeof error?.message === "string" ? error.message : String(error || "");
+
+      if (isAbort) {
+        throw {
+          code: "REQUEST_ABORTED",
+          message:
+            "The request took too long or the connection was interrupted. Please try again.",
+          status: 0,
+          requestId: rid,
+        };
+      }
+
+      throw {
+        code: "FETCH_FAILED",
+        message:
+          "Could not reach the backend service. Make sure the backend is running, then try again.",
+        status: 0,
+        requestId: rid,
+        cause: rawMessage || undefined,
+      };
     } finally {
       clearTimeout(t);
     }
@@ -94,7 +117,11 @@ export async function fetchJsonWithAuth(url, options = {}, config = {}) {
     res = await fetchWithAuth(url, options, config);
   } catch (e) {
     if (typeof e === "object" && e?.code) throw e;
-    throw { code: "FETCH_FAILED", message: "Network/auth request failed.", status: 0 };
+    throw {
+      code: "FETCH_FAILED",
+      message: "Could not reach the backend service. Please try again.",
+      status: 0,
+    };
   }
 
   const body = await safeReadJson(res);

@@ -1,0 +1,1532 @@
+{
+  "essay_file_id": "1f00a3f5-a3de-4f1e-8f69-6e9a044a0441",
+  "results": {
+    "student_essay": {
+      "status": 200,
+      "elapsed_s": 246.82,
+      "response": {
+        "cached": false,
+        "request_id": "f0248fc2-dae4-4ab3-8570-c8a21e4bbd4c",
+        "ml": {
+          "feedback_category": "other",
+          "quality_band": "high",
+          "confidence_0_to_4": 4,
+          "raw": {
+            "feedback": {
+              "model": "student.feedback_classifier_multimodal",
+              "version": "v1",
+              "prediction": {
+                "label_id": 5,
+                "label": "other",
+                "confidence": 0.552314817905426
+              },
+              "modalities_used": {
+                "text": true,
+                "ocr": false,
+                "audio": false,
+                "table": true
+              }
+            },
+            "confidence": {
+              "model": "student.confidence_model_multimodal",
+              "version": "v1",
+              "prediction": {
+                "label_id": 1,
+                "label": "1",
+                "confidence": 0.9999163150787354
+              },
+              "modalities_used": {
+                "text": true,
+                "ocr": false,
+                "audio": false,
+                "table": true
+              }
+            }
+          }
+        },
+        "report": {
+          "summary": "Automated student feedback was limited, so the platform returned a safe fallback response for manual follow-up.",
+          "issues": [
+            {
+              "title": "Manual review recommended",
+              "evidence": "The automated generation service was unavailable, so a conservative fallback response was returned instead of speculative feedback. Both primary and fallback LangChain chains failed:",
+              "severity": "high"
+            }
+          ],
+          "strengths": [],
+          "architecture_review": {
+            "overview": "Not assessed.",
+            "backend": "Not assessed.",
+            "frontend": "Not assessed.",
+            "database": "Not assessed.",
+            "security": "Not assessed."
+          },
+          "implementation_review": {
+            "features_built": [],
+            "technical_quality": "Not assessed.",
+            "integration_quality": "Not assessed."
+          },
+          "evaluation_review": {
+            "testing_present": "Not assessed.",
+            "limitations": "Evidence was too limited for a reliable automated review.",
+            "academic_quality": "Not assessed."
+          },
+          "improvement_plan": [
+            {
+              "action": "Review the original submission manually before relying on the automated result.",
+              "why": "The fallback response kept recommendations conservative.",
+              "how": "Use manual review or regenerate once evidence quality improves.",
+              "priority": 1
+            },
+            {
+              "action": "Regenerate after improving evidence quality or resolving the underlying system issue.",
+              "why": "The fallback response kept recommendations conservative.",
+              "how": "Use manual review or regenerate once evidence quality improves.",
+              "priority": 2
+            }
+          ],
+          "checklist": [
+            {
+              "item": "Manual review completed",
+              "done": false
+            },
+            {
+              "item": "Fallback trigger reviewed",
+              "done": false
+            }
+          ],
+          "confidence": {
+            "mode": "restricted",
+            "overall": 0.1
+          },
+          "model_agreement": {
+            "ml_confidence": 1.0,
+            "llm_confidence": 0.0,
+            "final_confidence": 0.1
+          },
+          "safety": {
+            "needs_review": true,
+            "reason": "Both primary and fallback LangChain chains failed:"
+          },
+          "rag_meta": null
+        },
+        "rag_meta": {
+          "enabled": true,
+          "confidence_score": 0.8938922868532039,
+          "confidence_label": "high",
+          "safe_review": false,
+          "chunk_count": 4,
+          "weak_retrieval": false,
+          "citations": [
+            {
+              "title": "Essay Structure",
+              "section": "unknown",
+              "document_id": "1b9ef624f29a298d08eac812",
+              "chunk_id": "1b9ef624f29a298d08eac812:chunk:0",
+              "category": "writing",
+              "score": 0.6846347926231482
+            },
+            {
+              "title": "Critical Analysis",
+              "section": "unknown",
+              "document_id": "7481a643ff328ab95424f83b",
+              "chunk_id": "7481a643ff328ab95424f83b:chunk:0",
+              "category": "critical_thinking",
+              "score": 0.598920601357931
+            },
+            {
+              "title": "Using Evidence",
+              "section": "unknown",
+              "document_id": "1960a92ba32b07fd47f13240",
+              "chunk_id": "1960a92ba32b07fd47f13240:chunk:0",
+              "category": "research_support",
+              "score": 0.5710851353914552
+            },
+            {
+              "title": "Source Quality",
+              "section": "unknown",
+              "document_id": "a6a42ff27a68c6d61226d5a6",
+              "chunk_id": "a6a42ff27a68c6d61226d5a6:chunk:0",
+              "category": "research_support",
+              "score": 0.5311901206115114
+            }
+          ]
+        },
+        "meta": {
+          "role": "student",
+          "needs_review": true,
+          "model_used": "",
+          "fallback_used": true,
+          "decision_source": "fallback",
+          "execution_mode": "fallback",
+          "discrepancy_flag": false
+        },
+        "stored": {
+          "id": "2b831dac-7be1-46fd-b934-d3d05be6d4e0",
+          "file_id": "1f00a3f5-a3de-4f1e-8f69-6e9a044a0441",
+          "submission_id": null,
+          "role": "student",
+          "needs_review": true,
+          "created_at": "2026-04-04T16:41:47.626927+00:00"
+        }
+      },
+      "stored_row": {
+        "id": "2b831dac-7be1-46fd-b934-d3d05be6d4e0",
+        "file_id": "1f00a3f5-a3de-4f1e-8f69-6e9a044a0441",
+        "role": "student",
+        "created_at": "2026-04-04T16:41:47.626927+00:00",
+        "needs_review": true,
+        "report_json": {
+          "issues": [
+            {
+              "title": "Manual review recommended",
+              "evidence": "The automated generation service was unavailable, so a conservative fallback response was returned instead of speculative feedback. Both primary and fallback LangChain chains failed:",
+              "severity": "high"
+            }
+          ],
+          "safety": {
+            "reason": "Both primary and fallback LangChain chains failed:",
+            "needs_review": true
+          },
+          "summary": "Automated student feedback was limited, so the platform returned a safe fallback response for manual follow-up.",
+          "checklist": [
+            {
+              "done": false,
+              "item": "Manual review completed"
+            },
+            {
+              "done": false,
+              "item": "Fallback trigger reviewed"
+            }
+          ],
+          "strengths": [],
+          "confidence": {
+            "mode": "restricted",
+            "overall": 0.1
+          },
+          "model_agreement": {
+            "ml_confidence": 1.0,
+            "llm_confidence": 0.0,
+            "final_confidence": 0.1
+          },
+          "improvement_plan": [
+            {
+              "how": "Use manual review or regenerate once evidence quality improves.",
+              "why": "The fallback response kept recommendations conservative.",
+              "action": "Review the original submission manually before relying on the automated result.",
+              "priority": 1
+            },
+            {
+              "how": "Use manual review or regenerate once evidence quality improves.",
+              "why": "The fallback response kept recommendations conservative.",
+              "action": "Regenerate after improving evidence quality or resolving the underlying system issue.",
+              "priority": 2
+            }
+          ],
+          "evaluation_review": {
+            "limitations": "Evidence was too limited for a reliable automated review.",
+            "testing_present": "Not assessed.",
+            "academic_quality": "Not assessed."
+          },
+          "architecture_review": {
+            "backend": "Not assessed.",
+            "database": "Not assessed.",
+            "frontend": "Not assessed.",
+            "overview": "Not assessed.",
+            "security": "Not assessed."
+          },
+          "implementation_review": {
+            "features_built": [],
+            "technical_quality": "Not assessed.",
+            "integration_quality": "Not assessed."
+          }
+        },
+        "rag_trace": {
+          "mode": "essay",
+          "query": "academic student submission review: Artificial Intelligence and Academic Integrity in Higher Education Introduction This essay argues that universities should adopt a balanced approach to generative AI that protects academic integrity",
+          "scores": [
+            0.09232681916853858,
+            0.043204330054303464,
+            0.03424947344489082,
+            0.030484748348503787,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.2182379159902268,
+            0.2141227819953201,
+            0.19440808784216734,
+            0.18455508189098746,
+            0.1649890818193811,
+            0.08599164207516907,
+            0.020387374969657812,
+            0.011611389585325371,
+            0.0,
+            0.0,
+            0.13748463853705084,
+            0.06829300027368634,
+            0.06096189315000444,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.19709537090322193,
+            0.12866448325547908,
+            0.11865814706941658,
+            0.11575245903937859,
+            0.11552410741414654,
+            0.10718282462535544,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.4571249046508218,
+            0.4558551465457341,
+            0.21207377080811451,
+            0.20936954471395852,
+            0.2063918698666638,
+            0.17626715701241125,
+            0.1386897855233713,
+            0.11374500464480464,
+            0.08289899062513661,
+            0.04129844956464079,
+            0.41649728144135145,
+            0.2954873573392981,
+            0.091071180257702,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.4157378373780336,
+            0.3993208390929187,
+            0.3959925867597104,
+            0.3396573810192606,
+            0.26648619517264893,
+            0.10244838483842977,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "audience": "student",
+          "cache_hit": false,
+          "title_hint": "Artificial Intelligence and Academic Integrity in Higher Education Introduction This essay argues that universities should adopt a balanced approach to generati",
+          "text_excerpt": "Artificial Intelligence and Academic Integrity in Higher Education Introduction This essay argues that universities should adopt a balanced approach to generative AI that protects academic integrity without reducing higher education to a purely punitive model. The central thesis is that policy should combine transparent guidance, assessment redesign, and critical AI literacy rather than relying only on prohibition. Argument and Critical Analysis Current literature shows that generative AI can support drafting, summarising, and revision, but it can also weaken independent reasoning when students rely on tools uncritically. A strong academic re",
+          "token_budget": 2500,
+          "keywords_used": [
+            "introduction",
+            "conclusion",
+            "argument",
+            "critical analysis",
+            "policy",
+            "literature",
+            "thesis",
+            "higher education",
+            "education",
+            "integrity",
+            "citation",
+            "higher"
+          ],
+          "degraded_input": false,
+          "detected_topic": "structure",
+          "packaging_role": "student",
+          "applied_filters": {
+            "$and": [
+              {
+                "status": "active"
+              },
+              {
+                "audience": "student"
+              }
+            ]
+          },
+          "collection_name": "student_knowledge_base",
+          "effective_top_k": 5,
+          "final_chunk_ids": [
+            "1b9ef624f29a298d08eac812:chunk:0",
+            "7481a643ff328ab95424f83b:chunk:0",
+            "1960a92ba32b07fd47f13240:chunk:0",
+            "a6a42ff27a68c6d61226d5a6:chunk:0"
+          ],
+          "integrity_focus": false,
+          "requested_top_k": 5,
+          "selected_titles": [
+            "Essay Structure",
+            "Critical Analysis",
+            "Using Evidence",
+            "Source Quality"
+          ],
+          "confidence_label": "high",
+          "confidence_score": 0.8938922868532039,
+          "expanded_queries": [
+            "Artificial Intelligence and Academic Integrity in Higher Education Introduction This essay argues that universities should adopt a balanced approach to generati",
+            "introduction conclusion argument critical analysis policy literature thesis higher education integrity citation",
+            "academic integrity introduction ai artificial intelligence higher",
+            "Artificial Intelligence and Academic Integrity in Higher Education Introduction This essay argues that universities should adopt a balanced approach to generati ai writing student review",
+            "student academic writing structure argument evidence",
+            "critical analysis comparison reasoning methodology",
+            "citation referencing attribution academic integrity"
+          ],
+          "final_categories": [
+            "critical_thinking",
+            "research_support",
+            "writing"
+          ],
+          "retrieved_titles": [
+            "Using Evidence",
+            "Essay Structure",
+            "Critical Analysis",
+            "Source Quality",
+            "In Text Citation Rules",
+            "Plagiarism Guidance",
+            "Apa7 Basics",
+            "Compare And Evaluate",
+            "Paraphrasing Guidance",
+            "Paragraph Development"
+          ],
+          "ml_signal_summary": "feedback_category=other; quality_band=high; confidence_0_to_4=4; raw={'feedback': {'model': 'student.feedback_classifier_multimodal', 'version': 'v1', 'prediction': {'label_id': 5, 'label': 'other', 'confidence': 0.552314817905426}, 'modalities_used': {'text': True, 'ocr': False, 'audio': False, 'table': True}}, 'confidence': {'model': 'student.confidence_model_multimodal', 'version': 'v1', 'prediction': {'label_id': 1, 'label': '1', 'confidence': 0.9999163150787354}, 'modalities_used': {'text': True, 'ocr': False, 'audio': False, 'table': True}}}",
+          "rewritten_queries": [
+            "Artificial Intelligence and Academic Integrity in Higher Education Introduction This essay argues that universities should adopt a balanced approach to generati",
+            "introduction conclusion argument critical analysis policy literature thesis higher education integrity citation",
+            "academic integrity introduction ai artificial intelligence higher",
+            "Artificial Intelligence and Academic Integrity in Higher Education Introduction This essay argues that universities should adopt a balanced approach to generati ai writing student review",
+            "student academic writing structure argument evidence",
+            "critical analysis comparison reasoning methodology",
+            "citation referencing attribution academic integrity"
+          ],
+          "eligibility_summary": {},
+          "retrieved_chunk_ids": [
+            "1b9ef624f29a298d08eac812:chunk:0",
+            "ce912a2faa99f90c84ff8c94:chunk:0",
+            "a6a42ff27a68c6d61226d5a6:chunk:0",
+            "4edae23bd2e4e4acd049c84c:chunk:0",
+            "1960a92ba32b07fd47f13240:chunk:0",
+            "7481a643ff328ab95424f83b:chunk:0",
+            "6937fbc1dfcef6cb02e1ae50:chunk:0",
+            "3c2084c2dc5f75d7daf2abff:chunk:0",
+            "0c628e43254ef7ff1d701fbf:chunk:0",
+            "fc2296c77396681a5e084c21:chunk:0",
+            "a6a42ff27a68c6d61226d5a6:chunk:0",
+            "7481a643ff328ab95424f83b:chunk:0",
+            "1960a92ba32b07fd47f13240:chunk:0",
+            "1b9ef624f29a298d08eac812:chunk:0",
+            "ce912a2faa99f90c84ff8c94:chunk:0",
+            "4edae23bd2e4e4acd049c84c:chunk:0",
+            "3c2084c2dc5f75d7daf2abff:chunk:0",
+            "6937fbc1dfcef6cb02e1ae50:chunk:0",
+            "0c628e43254ef7ff1d701fbf:chunk:0",
+            "fc2296c77396681a5e084c21:chunk:0",
+            "a6a42ff27a68c6d61226d5a6:chunk:0",
+            "4edae23bd2e4e4acd049c84c:chunk:0",
+            "1b9ef624f29a298d08eac812:chunk:0",
+            "1960a92ba32b07fd47f13240:chunk:0",
+            "7481a643ff328ab95424f83b:chunk:0",
+            "ce912a2faa99f90c84ff8c94:chunk:0",
+            "3c2084c2dc5f75d7daf2abff:chunk:0",
+            "0c628e43254ef7ff1d701fbf:chunk:0",
+            "6937fbc1dfcef6cb02e1ae50:chunk:0",
+            "fc2296c77396681a5e084c21:chunk:0",
+            "1b9ef624f29a298d08eac812:chunk:0",
+            "7481a643ff328ab95424f83b:chunk:0",
+            "a6a42ff27a68c6d61226d5a6:chunk:0",
+            "1960a92ba32b07fd47f13240:chunk:0",
+            "4edae23bd2e4e4acd049c84c:chunk:0",
+            "ce912a2faa99f90c84ff8c94:chunk:0",
+            "6937fbc1dfcef6cb02e1ae50:chunk:0",
+            "3c2084c2dc5f75d7daf2abff:chunk:0",
+            "0c628e43254ef7ff1d701fbf:chunk:0",
+            "fc2296c77396681a5e084c21:chunk:0",
+            "1960a92ba32b07fd47f13240:chunk:0",
+            "1b9ef624f29a298d08eac812:chunk:0",
+            "a6a42ff27a68c6d61226d5a6:chunk:0",
+            "6937fbc1dfcef6cb02e1ae50:chunk:0",
+            "7481a643ff328ab95424f83b:chunk:0",
+            "3c2084c2dc5f75d7daf2abff:chunk:0",
+            "4edae23bd2e4e4acd049c84c:chunk:0",
+            "ce912a2faa99f90c84ff8c94:chunk:0",
+            "fc2296c77396681a5e084c21:chunk:0",
+            "0c628e43254ef7ff1d701fbf:chunk:0",
+            "7481a643ff328ab95424f83b:chunk:0",
+            "ce912a2faa99f90c84ff8c94:chunk:0",
+            "a6a42ff27a68c6d61226d5a6:chunk:0",
+            "1b9ef624f29a298d08eac812:chunk:0",
+            "1960a92ba32b07fd47f13240:chunk:0",
+            "3c2084c2dc5f75d7daf2abff:chunk:0",
+            "6937fbc1dfcef6cb02e1ae50:chunk:0",
+            "0c628e43254ef7ff1d701fbf:chunk:0",
+            "fc2296c77396681a5e084c21:chunk:0",
+            "4edae23bd2e4e4acd049c84c:chunk:0",
+            "a6a42ff27a68c6d61226d5a6:chunk:0",
+            "fc2296c77396681a5e084c21:chunk:0",
+            "4edae23bd2e4e4acd049c84c:chunk:0",
+            "0c628e43254ef7ff1d701fbf:chunk:0",
+            "1960a92ba32b07fd47f13240:chunk:0",
+            "6937fbc1dfcef6cb02e1ae50:chunk:0",
+            "ce912a2faa99f90c84ff8c94:chunk:0",
+            "3c2084c2dc5f75d7daf2abff:chunk:0",
+            "1b9ef624f29a298d08eac812:chunk:0",
+            "7481a643ff328ab95424f83b:chunk:0"
+          ],
+          "packaging_char_budget": 12000,
+          "packaging_chunk_count": 4,
+          "initial_candidate_count": 10,
+          "packaging_context_chars": 2557,
+          "reranking_changed_order": true,
+          "packaging_weak_retrieval": false
+        },
+        "model_versions": {
+          "pipeline": "phase10_langchain",
+          "agreement": {
+            "final_confidence": 0.1
+          },
+          "request_id": "c0561ea4-9da2-47fa-a6c9-62ac11cfdf87",
+          "timings_ms": {
+            "ml": 10,
+            "llm": 240360,
+            "rag": 1630,
+            "total": 242077,
+            "prompt": 5
+          },
+          "llm_primary": "mistral:latest",
+          "llm_fallback": "gemma3:latest",
+          "chain_version": "1.0",
+          "llm_model_used": "unknown",
+          "schema_version": "1.0"
+        }
+      }
+    },
+    "student_code": {
+      "status": 200,
+      "elapsed_s": 248.18,
+      "response": {
+        "cached": false,
+        "request_id": "70f65651-3406-4e29-a5f8-52c445f55ca3",
+        "ml": {
+          "feedback_category": "other",
+          "quality_band": "high",
+          "confidence_0_to_4": 4,
+          "raw": {
+            "feedback": {
+              "model": "student.feedback_classifier_multimodal",
+              "version": "v1",
+              "prediction": {
+                "label_id": 5,
+                "label": "other",
+                "confidence": 0.3578590452671051
+              },
+              "modalities_used": {
+                "text": true,
+                "ocr": false,
+                "audio": false,
+                "table": true
+              }
+            },
+            "confidence": {
+              "model": "student.confidence_model_multimodal",
+              "version": "v1",
+              "prediction": {
+                "label_id": 1,
+                "label": "1",
+                "confidence": 0.9964816570281982
+              },
+              "modalities_used": {
+                "text": true,
+                "ocr": false,
+                "audio": false,
+                "table": true
+              }
+            }
+          }
+        },
+        "report": {
+          "summary": "Automated student feedback was limited, so the platform returned a safe fallback response for manual follow-up.",
+          "issues": [
+            {
+              "title": "Manual review recommended",
+              "evidence": "The automated generation service was unavailable, so a conservative fallback response was returned instead of speculative feedback. Both primary and fallback LangChain chains failed:",
+              "severity": "high"
+            }
+          ],
+          "strengths": [],
+          "architecture_review": {
+            "overview": "Not assessed.",
+            "backend": "Not assessed.",
+            "frontend": "Not assessed.",
+            "database": "Not assessed.",
+            "security": "Not assessed."
+          },
+          "implementation_review": {
+            "features_built": [],
+            "technical_quality": "Not assessed.",
+            "integration_quality": "Not assessed."
+          },
+          "evaluation_review": {
+            "testing_present": "Not assessed.",
+            "limitations": "Evidence was too limited for a reliable automated review.",
+            "academic_quality": "Not assessed."
+          },
+          "improvement_plan": [
+            {
+              "action": "Review the original submission manually before relying on the automated result.",
+              "why": "The fallback response kept recommendations conservative.",
+              "how": "Use manual review or regenerate once evidence quality improves.",
+              "priority": 1
+            },
+            {
+              "action": "Regenerate after improving evidence quality or resolving the underlying system issue.",
+              "why": "The fallback response kept recommendations conservative.",
+              "how": "Use manual review or regenerate once evidence quality improves.",
+              "priority": 2
+            }
+          ],
+          "checklist": [
+            {
+              "item": "Manual review completed",
+              "done": false
+            },
+            {
+              "item": "Fallback trigger reviewed",
+              "done": false
+            }
+          ],
+          "confidence": {
+            "mode": "restricted",
+            "overall": 0.1
+          },
+          "model_agreement": {
+            "ml_confidence": 0.996,
+            "llm_confidence": 0.0,
+            "final_confidence": 0.1
+          },
+          "safety": {
+            "needs_review": true,
+            "reason": "Both primary and fallback LangChain chains failed:"
+          },
+          "rag_meta": null
+        },
+        "rag_meta": {
+          "enabled": true,
+          "confidence_score": 0.5716678067641472,
+          "confidence_label": "medium",
+          "safe_review": false,
+          "chunk_count": 4,
+          "weak_retrieval": false,
+          "citations": [
+            {
+              "title": "Compare And Evaluate",
+              "section": "unknown",
+              "document_id": "ce912a2faa99f90c84ff8c94",
+              "chunk_id": "ce912a2faa99f90c84ff8c94:chunk:0",
+              "category": "critical_thinking",
+              "score": 0.29410319227294524
+            },
+            {
+              "title": "Source Quality",
+              "section": "unknown",
+              "document_id": "a6a42ff27a68c6d61226d5a6",
+              "chunk_id": "a6a42ff27a68c6d61226d5a6:chunk:0",
+              "category": "research_support",
+              "score": 0.293
+            },
+            {
+              "title": "Using Evidence",
+              "section": "unknown",
+              "document_id": "1960a92ba32b07fd47f13240",
+              "chunk_id": "1960a92ba32b07fd47f13240:chunk:0",
+              "category": "research_support",
+              "score": 0.293
+            },
+            {
+              "title": "Critical Analysis",
+              "section": "unknown",
+              "document_id": "7481a643ff328ab95424f83b",
+              "chunk_id": "7481a643ff328ab95424f83b:chunk:0",
+              "category": "critical_thinking",
+              "score": 0.28091666666666665
+            }
+          ]
+        },
+        "meta": {
+          "role": "student",
+          "needs_review": true,
+          "model_used": "",
+          "fallback_used": true,
+          "decision_source": "fallback",
+          "execution_mode": "fallback",
+          "discrepancy_flag": false
+        },
+        "stored": {
+          "id": "aaf2e3c8-0e4f-4cb2-9473-c4f21f3c464f",
+          "file_id": "cda594da-9ed5-4058-af40-725d67909299",
+          "submission_id": null,
+          "role": "student",
+          "needs_review": true,
+          "created_at": "2026-04-04T16:45:55.642478+00:00"
+        }
+      },
+      "stored_row": {
+        "id": "aaf2e3c8-0e4f-4cb2-9473-c4f21f3c464f",
+        "file_id": "cda594da-9ed5-4058-af40-725d67909299",
+        "role": "student",
+        "created_at": "2026-04-04T16:45:55.642478+00:00",
+        "needs_review": true,
+        "report_json": {
+          "issues": [
+            {
+              "title": "Manual review recommended",
+              "evidence": "The automated generation service was unavailable, so a conservative fallback response was returned instead of speculative feedback. Both primary and fallback LangChain chains failed:",
+              "severity": "high"
+            }
+          ],
+          "safety": {
+            "reason": "Both primary and fallback LangChain chains failed:",
+            "needs_review": true
+          },
+          "summary": "Automated student feedback was limited, so the platform returned a safe fallback response for manual follow-up.",
+          "checklist": [
+            {
+              "done": false,
+              "item": "Manual review completed"
+            },
+            {
+              "done": false,
+              "item": "Fallback trigger reviewed"
+            }
+          ],
+          "strengths": [],
+          "confidence": {
+            "mode": "restricted",
+            "overall": 0.1
+          },
+          "model_agreement": {
+            "ml_confidence": 0.996,
+            "llm_confidence": 0.0,
+            "final_confidence": 0.1
+          },
+          "improvement_plan": [
+            {
+              "how": "Use manual review or regenerate once evidence quality improves.",
+              "why": "The fallback response kept recommendations conservative.",
+              "action": "Review the original submission manually before relying on the automated result.",
+              "priority": 1
+            },
+            {
+              "how": "Use manual review or regenerate once evidence quality improves.",
+              "why": "The fallback response kept recommendations conservative.",
+              "action": "Regenerate after improving evidence quality or resolving the underlying system issue.",
+              "priority": 2
+            }
+          ],
+          "evaluation_review": {
+            "limitations": "Evidence was too limited for a reliable automated review.",
+            "testing_present": "Not assessed.",
+            "academic_quality": "Not assessed."
+          },
+          "architecture_review": {
+            "backend": "Not assessed.",
+            "database": "Not assessed.",
+            "frontend": "Not assessed.",
+            "overview": "Not assessed.",
+            "security": "Not assessed."
+          },
+          "implementation_review": {
+            "features_built": [],
+            "technical_quality": "Not assessed.",
+            "integration_quality": "Not assessed."
+          }
+        },
+        "rag_trace": {
+          "mode": "code",
+          "query": "project student submission review: GrafPack Application A C# Windows Forms Drawing Application Coursework Report \u2014 MOD006127 | 2024\u201325 Tri2 March 2026 1. Introduction GrafPack is an interactive, two-dimensional drawing application writ",
+          "scores": [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.00631260349683882,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "audience": "student",
+          "cache_hit": false,
+          "title_hint": "GrafPack Application A C# Windows Forms Drawing Application Coursework Report \u2014 MOD006127 | 2024\u201325 Tri2 March 2026 1",
+          "text_excerpt": "GrafPack Application A C# Windows Forms Drawing Application Coursework Report \u2014 MOD006127 | 2024\u201325 Tri2 March 2026 1. Introduction GrafPack is an interactive, two-dimensional drawing application written in C# using Windows Forms. It was developed to explore the practical application of object-oriented programming principles \u2014 specifically inheritance, abstraction, and polymorphism \u2014 within a graphical, event-driven environment. The brief called for a desktop tool capable of creating geometric shapes, selecting them, applying spatial transformations, and removing them from the canvas, all through a menu-driven interface. What made this projec",
+          "token_budget": 2500,
+          "keywords_used": [
+            "windows forms",
+            "application",
+            "algorithm",
+            "grafpack",
+            "drawing",
+            "windows",
+            "class",
+            "forms",
+            "form",
+            "grafpack application",
+            "drawing application",
+            "testing"
+          ],
+          "degraded_input": false,
+          "detected_topic": "structure",
+          "packaging_role": "student",
+          "applied_filters": {
+            "$and": [
+              {
+                "status": "active"
+              },
+              {
+                "audience": "student"
+              }
+            ]
+          },
+          "collection_name": "student_knowledge_base",
+          "effective_top_k": 8,
+          "final_chunk_ids": [
+            "ce912a2faa99f90c84ff8c94:chunk:0",
+            "a6a42ff27a68c6d61226d5a6:chunk:0",
+            "1960a92ba32b07fd47f13240:chunk:0",
+            "7481a643ff328ab95424f83b:chunk:0"
+          ],
+          "integrity_focus": false,
+          "requested_top_k": 8,
+          "selected_titles": [
+            "Compare And Evaluate",
+            "Source Quality",
+            "Using Evidence",
+            "Critical Analysis"
+          ],
+          "confidence_label": "medium",
+          "confidence_score": 0.5716678067641472,
+          "expanded_queries": [
+            "GrafPack Application A C# Windows Forms Drawing Coursework Report MOD006127 2024\u201325 Tri2 March 2026 1",
+            "windows forms application algorithm grafpack drawing class form testing",
+            "introduction apa grafpack application c# windows forms",
+            "GrafPack Application A C# Windows Forms Drawing Coursework Report MOD006127 2024\u201325 Tri2 March 2026 1 introduction software project student review",
+            "student software project architecture implementation integration",
+            "software project implementation integration features introduction grafpack application c# windows forms drawing",
+            "student project testing validation usability limitations"
+          ],
+          "final_categories": [
+            "critical_thinking",
+            "research_support"
+          ],
+          "retrieved_titles": [
+            "Compare And Evaluate",
+            "Plagiarism Guidance",
+            "Essay Structure",
+            "Paraphrasing Guidance",
+            "Critical Analysis",
+            "Source Quality",
+            "Using Evidence",
+            "In Text Citation Rules",
+            "Apa7 Basics",
+            "Paragraph Development"
+          ],
+          "ml_signal_summary": "feedback_category=other; quality_band=high; confidence_0_to_4=4; raw={'feedback': {'model': 'student.feedback_classifier_multimodal', 'version': 'v1', 'prediction': {'label_id': 5, 'label': 'other', 'confidence': 0.3578590452671051}, 'modalities_used': {'text': True, 'ocr': False, 'audio': False, 'table': True}}, 'confidence': {'model': 'student.confidence_model_multimodal', 'version': 'v1', 'prediction': {'label_id': 1, 'label': '1', 'confidence': 0.9964816570281982}, 'modalities_used': {'text': True, 'ocr': False, 'audio': False, 'table': True}}}",
+          "rewritten_queries": [
+            "GrafPack Application A C# Windows Forms Drawing Coursework Report MOD006127 2024\u201325 Tri2 March 2026 1",
+            "windows forms application algorithm grafpack drawing class form testing",
+            "introduction apa grafpack application c# windows forms",
+            "GrafPack Application A C# Windows Forms Drawing Coursework Report MOD006127 2024\u201325 Tri2 March 2026 1 introduction software project student review",
+            "student software project architecture implementation integration",
+            "software project implementation integration features introduction grafpack application c# windows forms drawing",
+            "student project testing validation usability limitations"
+          ],
+          "eligibility_summary": {},
+          "retrieved_chunk_ids": [
+            "4edae23bd2e4e4acd049c84c:chunk:0",
+            "1b9ef624f29a298d08eac812:chunk:0",
+            "6937fbc1dfcef6cb02e1ae50:chunk:0",
+            "7481a643ff328ab95424f83b:chunk:0",
+            "a6a42ff27a68c6d61226d5a6:chunk:0",
+            "1960a92ba32b07fd47f13240:chunk:0",
+            "fc2296c77396681a5e084c21:chunk:0",
+            "0c628e43254ef7ff1d701fbf:chunk:0",
+            "3c2084c2dc5f75d7daf2abff:chunk:0",
+            "ce912a2faa99f90c84ff8c94:chunk:0",
+            "4edae23bd2e4e4acd049c84c:chunk:0",
+            "ce912a2faa99f90c84ff8c94:chunk:0",
+            "1b9ef624f29a298d08eac812:chunk:0",
+            "7481a643ff328ab95424f83b:chunk:0",
+            "6937fbc1dfcef6cb02e1ae50:chunk:0",
+            "a6a42ff27a68c6d61226d5a6:chunk:0",
+            "fc2296c77396681a5e084c21:chunk:0",
+            "1960a92ba32b07fd47f13240:chunk:0",
+            "0c628e43254ef7ff1d701fbf:chunk:0",
+            "3c2084c2dc5f75d7daf2abff:chunk:0",
+            "0c628e43254ef7ff1d701fbf:chunk:0",
+            "fc2296c77396681a5e084c21:chunk:0",
+            "1b9ef624f29a298d08eac812:chunk:0",
+            "4edae23bd2e4e4acd049c84c:chunk:0",
+            "a6a42ff27a68c6d61226d5a6:chunk:0",
+            "1960a92ba32b07fd47f13240:chunk:0",
+            "ce912a2faa99f90c84ff8c94:chunk:0",
+            "3c2084c2dc5f75d7daf2abff:chunk:0",
+            "6937fbc1dfcef6cb02e1ae50:chunk:0",
+            "7481a643ff328ab95424f83b:chunk:0",
+            "1b9ef624f29a298d08eac812:chunk:0",
+            "4edae23bd2e4e4acd049c84c:chunk:0",
+            "6937fbc1dfcef6cb02e1ae50:chunk:0",
+            "7481a643ff328ab95424f83b:chunk:0",
+            "1960a92ba32b07fd47f13240:chunk:0",
+            "3c2084c2dc5f75d7daf2abff:chunk:0",
+            "a6a42ff27a68c6d61226d5a6:chunk:0",
+            "ce912a2faa99f90c84ff8c94:chunk:0",
+            "fc2296c77396681a5e084c21:chunk:0",
+            "0c628e43254ef7ff1d701fbf:chunk:0",
+            "1b9ef624f29a298d08eac812:chunk:0",
+            "ce912a2faa99f90c84ff8c94:chunk:0",
+            "0c628e43254ef7ff1d701fbf:chunk:0",
+            "4edae23bd2e4e4acd049c84c:chunk:0",
+            "a6a42ff27a68c6d61226d5a6:chunk:0",
+            "7481a643ff328ab95424f83b:chunk:0",
+            "1960a92ba32b07fd47f13240:chunk:0",
+            "6937fbc1dfcef6cb02e1ae50:chunk:0",
+            "fc2296c77396681a5e084c21:chunk:0",
+            "3c2084c2dc5f75d7daf2abff:chunk:0",
+            "1b9ef624f29a298d08eac812:chunk:0",
+            "4edae23bd2e4e4acd049c84c:chunk:0",
+            "6937fbc1dfcef6cb02e1ae50:chunk:0",
+            "7481a643ff328ab95424f83b:chunk:0",
+            "1960a92ba32b07fd47f13240:chunk:0",
+            "a6a42ff27a68c6d61226d5a6:chunk:0",
+            "ce912a2faa99f90c84ff8c94:chunk:0",
+            "3c2084c2dc5f75d7daf2abff:chunk:0",
+            "fc2296c77396681a5e084c21:chunk:0",
+            "0c628e43254ef7ff1d701fbf:chunk:0",
+            "ce912a2faa99f90c84ff8c94:chunk:0",
+            "a6a42ff27a68c6d61226d5a6:chunk:0",
+            "7481a643ff328ab95424f83b:chunk:0",
+            "1960a92ba32b07fd47f13240:chunk:0",
+            "1b9ef624f29a298d08eac812:chunk:0",
+            "4edae23bd2e4e4acd049c84c:chunk:0",
+            "6937fbc1dfcef6cb02e1ae50:chunk:0",
+            "0c628e43254ef7ff1d701fbf:chunk:0",
+            "fc2296c77396681a5e084c21:chunk:0",
+            "3c2084c2dc5f75d7daf2abff:chunk:0"
+          ],
+          "packaging_char_budget": 12000,
+          "packaging_chunk_count": 4,
+          "initial_candidate_count": 10,
+          "packaging_context_chars": 2249,
+          "reranking_changed_order": true,
+          "packaging_weak_retrieval": false
+        },
+        "model_versions": {
+          "pipeline": "phase10_langchain",
+          "agreement": {
+            "final_confidence": 0.1
+          },
+          "request_id": "d5814f6a-ba2c-4b16-aa02-1b43b3f4665c",
+          "timings_ms": {
+            "ml": 1,
+            "llm": 240098,
+            "rag": 1337,
+            "total": 241522,
+            "prompt": 1
+          },
+          "llm_primary": "mistral:latest",
+          "llm_fallback": "gemma3:latest",
+          "chain_version": "1.0",
+          "llm_model_used": "unknown",
+          "schema_version": "1.0"
+        }
+      }
+    },
+    "professor_project": {
+      "status": 200,
+      "elapsed_s": 238.85,
+      "response": {
+        "cached": false,
+        "request_id": "483f698b-f143-4aba-8874-d4972572a157",
+        "ml": {
+          "rubric_band": "effective",
+          "argument_depth": "low",
+          "moderation_consistency": "high",
+          "raw": {
+            "model": "professor.rubric_suite_multimodal",
+            "version": "v1",
+            "predictions": {
+              "rubric_band": {
+                "label_id": 2,
+                "label": "effective",
+                "confidence": 0.4869481027126312,
+                "temperature": 1.0,
+                "uncertain": true,
+                "reason": "low_confidence"
+              },
+              "argument_depth": {
+                "label_id": 0,
+                "label": "shallow",
+                "confidence": 0.5150972008705139,
+                "temperature": 1.0,
+                "uncertain": true,
+                "reason": "low_confidence"
+              },
+              "moderation_consistency": {
+                "label_id": 2,
+                "label": "consistent",
+                "confidence": 0.9898053407669067,
+                "temperature": 1.0,
+                "uncertain": false,
+                "reason": "ok"
+              }
+            },
+            "uncertain": true,
+            "modalities_used": {
+              "text": true,
+              "ocr": false,
+              "audio": false,
+              "table": true
+            }
+          },
+          "raw_labels": {
+            "argument_depth": "shallow",
+            "moderation_consistency": "consistent"
+          }
+        },
+        "report": {
+          "rubric_breakdown": [
+            {
+              "criterion": "System Architecture and Implementation",
+              "band": "effective",
+              "justification": "The system utilizes Django and incorporates a portfolio analytics engine, including Sharpe ratio, beta, and drawdown calculations, as evidenced in Section 5. The database schema is described, and the use of Chart.js for visualization is documented. However, the lack of a live data feed and the reliance on SQLite represent areas for improvement."
+            },
+            {
+              "criterion": "Testing and Validation",
+              "band": "effective",
+              "justification": "A forty-case functional test programme and automated unit tests are reported, alongside a scalability experiment. The one hundred percent pass rate for the functional tests and the automated regression detection provide some assurance of the system\u2019s stability. The Gemini AI output quality was evaluated through a two-condition, fifteen-query experiment, with 100% inter-rater agreement, demonstrating a degree of validation for the AI component. However, the scope of the testing is limited."
+            }
+          ],
+          "feedback_explanation": "The submitted StockPortfolioManagementSystem demonstrates a reasonable level of technical implementation, utilizing Django and incorporating AI capabilities. The system\u2019s architecture, including the database design and analytics module, aligns with the project\u2019s stated aims. However, the depth of the argument and the level of detail in the implementation are somewhat shallow, particularly concerning the integration of the Google Gemini AI assistant and the rigorous validation of its outputs. The reliance on a single-user SQLite deployment and the absence of live market data represent significant limitations.",
+          "moderation_notes": [
+            {
+              "risk": "AI integration vulnerability",
+              "note": "The integration of Google Gemini, while present, lacks detailed documentation regarding the API calls and the specific contextual information provided. Further investigation is needed to assess the robustness and reliability of this component, particularly given the reliance on historical data."
+            },
+            {
+              "risk": "Scalability limitations",
+              "note": "The system\u2019s use of SQLite for single-user deployment presents a scalability concern. The documented scalability experiment, while demonstrating acceptable performance within a limited scope, does not fully address the challenges of supporting multiple concurrent users or larger portfolio sizes. The notes highlight a potential risk for future development."
+            }
+          ],
+          "safety": {
+            "needs_review": true,
+            "reason": "The reliance on a single-user SQLite deployment and the absence of live market data represent significant limitations that could impact the system's scalability and real-world applicability. Further investigation is required to assess the robustness of the AI integration and the potential for future development."
+          },
+          "rag_meta": null
+        },
+        "rag_meta": {
+          "enabled": true,
+          "confidence_score": 0.979683248000967,
+          "confidence_label": "high",
+          "safe_review": false,
+          "chunk_count": 4,
+          "weak_retrieval": false,
+          "citations": [
+            {
+              "title": "Disagreement Resolution",
+              "section": "unknown",
+              "document_id": "18bb36fdcadbb35aa3475983",
+              "chunk_id": "18bb36fdcadbb35aa3475983:chunk:0",
+              "category": "moderation",
+              "score": 0.7259548643123247
+            },
+            {
+              "title": "Moderation Notes",
+              "section": "unknown",
+              "document_id": "cd0b35c00505b938f90681e0",
+              "chunk_id": "cd0b35c00505b938f90681e0:chunk:0",
+              "category": "moderation",
+              "score": 0.7160768863534023
+            },
+            {
+              "title": "Marking Consistency",
+              "section": "unknown",
+              "document_id": "3be74a57721c685c31ad1a9a",
+              "chunk_id": "3be74a57721c685c31ad1a9a:chunk:0",
+              "category": "marking_policy",
+              "score": 0.6985551452350484
+            },
+            {
+              "title": "Borderline Work",
+              "section": "unknown",
+              "document_id": "853518f0eb08aa212ea03e69",
+              "chunk_id": "853518f0eb08aa212ea03e69:chunk:0",
+              "category": "marking_policy",
+              "score": 0.6029090846665797
+            }
+          ]
+        },
+        "meta": {
+          "role": "professor",
+          "needs_review": true,
+          "model_used": "gemma3:latest",
+          "fallback_used": true,
+          "decision_source": "fallback",
+          "execution_mode": "fallback",
+          "discrepancy_flag": false
+        },
+        "stored": {
+          "id": "4b166ad3-cfac-46fc-9720-342e3815e7c8",
+          "file_id": "6168bdc4-0935-4a2a-aa89-a4c4bdb48f68",
+          "submission_id": null,
+          "role": "professor",
+          "needs_review": true,
+          "created_at": "2026-04-04T16:49:54.687655+00:00"
+        }
+      },
+      "stored_row": {
+        "id": "4b166ad3-cfac-46fc-9720-342e3815e7c8",
+        "file_id": "6168bdc4-0935-4a2a-aa89-a4c4bdb48f68",
+        "role": "professor",
+        "created_at": "2026-04-04T16:49:54.687655+00:00",
+        "needs_review": true,
+        "report_json": {
+          "safety": {
+            "reason": "The reliance on a single-user SQLite deployment and the absence of live market data represent significant limitations that could impact the system's scalability and real-world applicability. Further investigation is required to assess the robustness of the AI integration and the potential for future development.",
+            "needs_review": true
+          },
+          "moderation_notes": [
+            {
+              "note": "The integration of Google Gemini, while present, lacks detailed documentation regarding the API calls and the specific contextual information provided. Further investigation is needed to assess the robustness and reliability of this component, particularly given the reliance on historical data.",
+              "risk": "AI integration vulnerability"
+            },
+            {
+              "note": "The system\u2019s use of SQLite for single-user deployment presents a scalability concern. The documented scalability experiment, while demonstrating acceptable performance within a limited scope, does not fully address the challenges of supporting multiple concurrent users or larger portfolio sizes. The notes highlight a potential risk for future development.",
+              "risk": "Scalability limitations"
+            }
+          ],
+          "rubric_breakdown": [
+            {
+              "band": "effective",
+              "criterion": "System Architecture and Implementation",
+              "justification": "The system utilizes Django and incorporates a portfolio analytics engine, including Sharpe ratio, beta, and drawdown calculations, as evidenced in Section 5. The database schema is described, and the use of Chart.js for visualization is documented. However, the lack of a live data feed and the reliance on SQLite represent areas for improvement."
+            },
+            {
+              "band": "effective",
+              "criterion": "Testing and Validation",
+              "justification": "A forty-case functional test programme and automated unit tests are reported, alongside a scalability experiment. The one hundred percent pass rate for the functional tests and the automated regression detection provide some assurance of the system\u2019s stability. The Gemini AI output quality was evaluated through a two-condition, fifteen-query experiment, with 100% inter-rater agreement, demonstrating a degree of validation for the AI component. However, the scope of the testing is limited."
+            }
+          ],
+          "feedback_explanation": "The submitted StockPortfolioManagementSystem demonstrates a reasonable level of technical implementation, utilizing Django and incorporating AI capabilities. The system\u2019s architecture, including the database design and analytics module, aligns with the project\u2019s stated aims. However, the depth of the argument and the level of detail in the implementation are somewhat shallow, particularly concerning the integration of the Google Gemini AI assistant and the rigorous validation of its outputs. The reliance on a single-user SQLite deployment and the absence of live market data represent significant limitations."
+        },
+        "rag_trace": {
+          "mode": "project",
+          "query": "project professor moderation review: ANGLIA RUSKIN UNIVERSITY Faculty of Science and Engineering BSc (Hons) Computer Science Final Year Dissertation An Integrated Database and Web-Based Platform for Stock Portfolio Management Using Data",
+          "scores": [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.13132453945239564,
+            0.055251922407445475,
+            0.006434997944914422,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.08805279155474577,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.3906644243178117,
+            0.3754675351502387,
+            0.3045233887789427,
+            0.16139859179473803,
+            0.14763865728029546,
+            0.14588762431206181,
+            0.01657898573821337,
+            0.011439599030794945,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "audience": "professor",
+          "cache_hit": false,
+          "title_hint": "ANGLIA RUSKIN UNIVERSITY Faculty of Science and Engineering BSc (Hons) Computer Science Final Year Dissertation An Integrated Database and Web-Based Platform fo",
+          "text_excerpt": "ANGLIA RUSKIN UNIVERSITY Faculty of Science and Engineering BSc (Hons) Computer Science Final Year Dissertation An Integrated Database and Web-Based Platform for Stock Portfolio Management Using Data Analytics and AI-Powered Insights Rishabh Tomar Student ID: [REDACTED_PHONE] | [REDACTED_EMAIL] Supervisor: Leila Muresan | Project Reference: SP121 Academic Year: 2025/2026 Word Count (excluding references): 10,350 words ABSTRACT This dissertation presents the design, development, testing, and evaluation of StockIntel, a web-based Stock Portfolio Management System built using Python and the Django web framework. The system provides BUY and SELL ",
+          "token_budget": 2500,
+          "keywords_used": [
+            "web-based",
+            "database",
+            "science",
+            "data",
+            "year",
+            "anglia ruskin university",
+            "ruskin university",
+            "anglia ruskin",
+            "dissertation",
+            "university",
+            "anglia",
+            "ruskin"
+          ],
+          "degraded_input": false,
+          "detected_topic": "moderation",
+          "packaging_role": "professor",
+          "applied_filters": {
+            "$and": [
+              {
+                "status": "active"
+              },
+              {
+                "audience": "professor"
+              }
+            ]
+          },
+          "collection_name": "professor_knowledge_base",
+          "effective_top_k": 8,
+          "final_chunk_ids": [
+            "18bb36fdcadbb35aa3475983:chunk:0",
+            "cd0b35c00505b938f90681e0:chunk:0",
+            "3be74a57721c685c31ad1a9a:chunk:0",
+            "853518f0eb08aa212ea03e69:chunk:0"
+          ],
+          "integrity_focus": false,
+          "requested_top_k": 8,
+          "selected_titles": [
+            "Disagreement Resolution",
+            "Moderation Notes",
+            "Marking Consistency",
+            "Borderline Work"
+          ],
+          "confidence_label": "high",
+          "confidence_score": 0.979683248000967,
+          "expanded_queries": [
+            "ANGLIA RUSKIN UNIVERSITY Faculty of Science and Engineering BSc (Hons) Computer Final Year Dissertation An Integrated Database Web-Based Platform fo",
+            "web-based database science data year anglia ruskin university dissertation",
+            "django stock ai anglia ruskin university faculty",
+            "ANGLIA RUSKIN UNIVERSITY Faculty of Science and Engineering BSc (Hons) Computer Final Year Dissertation An Integrated Database Web-Based Platform fo stock project professor review",
+            "project rubric moderation technical quality architecture implementation",
+            "criterion justification backend frontend database testing django stock portfolio management implementation analytics dashboard",
+            "marking policy moderation consistency limitations evidence"
+          ],
+          "final_categories": [
+            "marking_policy",
+            "moderation"
+          ],
+          "retrieved_titles": [
+            "Disagreement Resolution",
+            "Moderation Notes",
+            "Marking Consistency",
+            "Borderline Work",
+            "Criterion Level Justification",
+            "Second Marking",
+            "Evidence Quality Expectations",
+            "High Distinction Descriptors",
+            "Analytical Depth Indicators",
+            "Grading Descriptors"
+          ],
+          "ml_signal_summary": "rubric_band=effective; argument_depth=low; moderation_consistency=high; raw={'model': 'professor.rubric_suite_multimodal', 'version': 'v1', 'predictions': {'rubric_band': {'label_id': 2, 'label': 'effective', 'confidence': 0.4869481027126312, 'temperature': 1.0, 'uncertain': True, 'reason': 'low_confidence'}, 'argument_depth': {'label_id': 0, 'label': 'shallow', 'confidence': 0.5150972008705139, 'temperature': 1.0, 'uncertain': True, 'reason': 'low_confidence'}, 'moderation_consistency': {'label_id': 2, 'label': 'consistent', 'confidence': 0.9898053407669067, 'temperature': 1.0, 'uncertain': False, 'reason': 'ok'}}, 'uncertain': True, 'modalities_used': {'text': True, 'ocr': False, 'audio': False, 'table': True}}; raw_labels={'argument_depth': 'shallow', 'moderation_consistency': 'consistent'}",
+          "rewritten_queries": [
+            "ANGLIA RUSKIN UNIVERSITY Faculty of Science and Engineering BSc (Hons) Computer Final Year Dissertation An Integrated Database Web-Based Platform fo",
+            "web-based database science data year anglia ruskin university dissertation",
+            "django stock ai anglia ruskin university faculty",
+            "ANGLIA RUSKIN UNIVERSITY Faculty of Science and Engineering BSc (Hons) Computer Final Year Dissertation An Integrated Database Web-Based Platform fo stock project professor review",
+            "project rubric moderation technical quality architecture implementation",
+            "criterion justification backend frontend database testing django stock portfolio management implementation analytics dashboard",
+            "marking policy moderation consistency limitations evidence"
+          ],
+          "eligibility_summary": {},
+          "retrieved_chunk_ids": [
+            "faec4219e11c667cecee0f59:chunk:0",
+            "3be74a57721c685c31ad1a9a:chunk:0",
+            "38053b9aff8144f919c878b6:chunk:0",
+            "6ed8039fcebb915676b7a912:chunk:0",
+            "416d8c5f5fdb464cd7e77801:chunk:0",
+            "18bb36fdcadbb35aa3475983:chunk:0",
+            "4cb83bfd28e12025c5184c6e:chunk:0",
+            "e3bc0160c2a67d3ca88afaf2:chunk:0",
+            "4091ee2c5f2ee278330af263:chunk:0",
+            "9e6e0d1bf79683a91f4ab6c3:chunk:0",
+            "d081f45f8be2d8579d4ebb3a:chunk:0",
+            "2fabf5a69b0c81647d9f0cb3:chunk:0",
+            "cd0b35c00505b938f90681e0:chunk:0",
+            "bc7801385239d3d98632fac6:chunk:0",
+            "f54ac72b36a1a11ee1863a0c:chunk:0",
+            "853518f0eb08aa212ea03e69:chunk:0",
+            "38053b9aff8144f919c878b6:chunk:0",
+            "6ed8039fcebb915676b7a912:chunk:0",
+            "4091ee2c5f2ee278330af263:chunk:0",
+            "18bb36fdcadbb35aa3475983:chunk:0",
+            "9e6e0d1bf79683a91f4ab6c3:chunk:0",
+            "3be74a57721c685c31ad1a9a:chunk:0",
+            "4cb83bfd28e12025c5184c6e:chunk:0",
+            "2fabf5a69b0c81647d9f0cb3:chunk:0",
+            "f54ac72b36a1a11ee1863a0c:chunk:0",
+            "faec4219e11c667cecee0f59:chunk:0",
+            "e3bc0160c2a67d3ca88afaf2:chunk:0",
+            "d081f45f8be2d8579d4ebb3a:chunk:0",
+            "416d8c5f5fdb464cd7e77801:chunk:0",
+            "853518f0eb08aa212ea03e69:chunk:0",
+            "cd0b35c00505b938f90681e0:chunk:0",
+            "bc7801385239d3d98632fac6:chunk:0",
+            "38053b9aff8144f919c878b6:chunk:0",
+            "9e6e0d1bf79683a91f4ab6c3:chunk:0",
+            "6ed8039fcebb915676b7a912:chunk:0",
+            "4091ee2c5f2ee278330af263:chunk:0",
+            "e3bc0160c2a67d3ca88afaf2:chunk:0",
+            "2fabf5a69b0c81647d9f0cb3:chunk:0",
+            "18bb36fdcadbb35aa3475983:chunk:0",
+            "4cb83bfd28e12025c5184c6e:chunk:0",
+            "faec4219e11c667cecee0f59:chunk:0",
+            "853518f0eb08aa212ea03e69:chunk:0",
+            "cd0b35c00505b938f90681e0:chunk:0",
+            "bc7801385239d3d98632fac6:chunk:0",
+            "416d8c5f5fdb464cd7e77801:chunk:0",
+            "f54ac72b36a1a11ee1863a0c:chunk:0",
+            "d081f45f8be2d8579d4ebb3a:chunk:0",
+            "3be74a57721c685c31ad1a9a:chunk:0",
+            "38053b9aff8144f919c878b6:chunk:0",
+            "faec4219e11c667cecee0f59:chunk:0",
+            "e3bc0160c2a67d3ca88afaf2:chunk:0",
+            "416d8c5f5fdb464cd7e77801:chunk:0",
+            "3be74a57721c685c31ad1a9a:chunk:0",
+            "18bb36fdcadbb35aa3475983:chunk:0",
+            "d081f45f8be2d8579d4ebb3a:chunk:0",
+            "4091ee2c5f2ee278330af263:chunk:0",
+            "2fabf5a69b0c81647d9f0cb3:chunk:0",
+            "4cb83bfd28e12025c5184c6e:chunk:0",
+            "6ed8039fcebb915676b7a912:chunk:0",
+            "9e6e0d1bf79683a91f4ab6c3:chunk:0",
+            "cd0b35c00505b938f90681e0:chunk:0",
+            "853518f0eb08aa212ea03e69:chunk:0",
+            "bc7801385239d3d98632fac6:chunk:0",
+            "f54ac72b36a1a11ee1863a0c:chunk:0",
+            "18bb36fdcadbb35aa3475983:chunk:0",
+            "cd0b35c00505b938f90681e0:chunk:0",
+            "3be74a57721c685c31ad1a9a:chunk:0",
+            "853518f0eb08aa212ea03e69:chunk:0",
+            "4cb83bfd28e12025c5184c6e:chunk:0",
+            "faec4219e11c667cecee0f59:chunk:0",
+            "416d8c5f5fdb464cd7e77801:chunk:0",
+            "9e6e0d1bf79683a91f4ab6c3:chunk:0",
+            "6ed8039fcebb915676b7a912:chunk:0",
+            "38053b9aff8144f919c878b6:chunk:0",
+            "f54ac72b36a1a11ee1863a0c:chunk:0",
+            "d081f45f8be2d8579d4ebb3a:chunk:0",
+            "bc7801385239d3d98632fac6:chunk:0",
+            "e3bc0160c2a67d3ca88afaf2:chunk:0",
+            "4091ee2c5f2ee278330af263:chunk:0",
+            "2fabf5a69b0c81647d9f0cb3:chunk:0",
+            "faec4219e11c667cecee0f59:chunk:0",
+            "cd0b35c00505b938f90681e0:chunk:0",
+            "416d8c5f5fdb464cd7e77801:chunk:0",
+            "853518f0eb08aa212ea03e69:chunk:0",
+            "38053b9aff8144f919c878b6:chunk:0",
+            "18bb36fdcadbb35aa3475983:chunk:0",
+            "4cb83bfd28e12025c5184c6e:chunk:0",
+            "3be74a57721c685c31ad1a9a:chunk:0",
+            "4091ee2c5f2ee278330af263:chunk:0",
+            "e3bc0160c2a67d3ca88afaf2:chunk:0",
+            "9e6e0d1bf79683a91f4ab6c3:chunk:0",
+            "bc7801385239d3d98632fac6:chunk:0",
+            "d081f45f8be2d8579d4ebb3a:chunk:0",
+            "f54ac72b36a1a11ee1863a0c:chunk:0",
+            "6ed8039fcebb915676b7a912:chunk:0",
+            "2fabf5a69b0c81647d9f0cb3:chunk:0",
+            "18bb36fdcadbb35aa3475983:chunk:0",
+            "cd0b35c00505b938f90681e0:chunk:0",
+            "3be74a57721c685c31ad1a9a:chunk:0",
+            "853518f0eb08aa212ea03e69:chunk:0",
+            "faec4219e11c667cecee0f59:chunk:0",
+            "bc7801385239d3d98632fac6:chunk:0",
+            "4091ee2c5f2ee278330af263:chunk:0",
+            "f54ac72b36a1a11ee1863a0c:chunk:0",
+            "4cb83bfd28e12025c5184c6e:chunk:0",
+            "416d8c5f5fdb464cd7e77801:chunk:0",
+            "6ed8039fcebb915676b7a912:chunk:0",
+            "9e6e0d1bf79683a91f4ab6c3:chunk:0",
+            "d081f45f8be2d8579d4ebb3a:chunk:0",
+            "2fabf5a69b0c81647d9f0cb3:chunk:0",
+            "38053b9aff8144f919c878b6:chunk:0",
+            "e3bc0160c2a67d3ca88afaf2:chunk:0"
+          ],
+          "packaging_char_budget": 12000,
+          "packaging_chunk_count": 4,
+          "initial_candidate_count": 16,
+          "packaging_context_chars": 1992,
+          "reranking_changed_order": true,
+          "packaging_weak_retrieval": false
+        },
+        "model_versions": {
+          "pipeline": "phase10_langchain",
+          "agreement": {
+            "final_confidence": 0.514
+          },
+          "request_id": "7d806852-6bba-417d-ad1c-66f3ecd67f85",
+          "timings_ms": {
+            "ml": 1,
+            "llm": 183567,
+            "rag": 11665,
+            "total": 196209,
+            "prompt": 4,
+            "moderation": 1,
+            "parse_validate": 15
+          },
+          "llm_primary": "mistral:latest",
+          "llm_fallback": "gemma3:latest",
+          "chain_version": "1.0",
+          "llm_model_used": "gemma3:latest",
+          "schema_version": "1.0"
+        }
+      }
+    }
+  }
+}

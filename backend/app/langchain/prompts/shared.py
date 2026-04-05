@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 from typing import Any, Mapping, Optional, Sequence
 
+from app.langchain.config import phase10_settings
+
 
 SHARED_RULE_LINES = (
     "Use only the provided evidence from the submission, Phase 6 predictions, and approved retrieved context.",
@@ -52,12 +54,37 @@ def _clean_text(value: Any, limit: int) -> str:
     return text[: max(0, limit - 3)].rstrip() + "..."
 
 
+def _as_mapping(value: Any) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _string_list(values: Any, *, limit: int, item_limit: int) -> list[str]:
+    if not isinstance(values, Sequence) or isinstance(values, (str, bytes, bytearray)):
+        return []
+    items: list[str] = []
+    for item in values:
+        text = _clean_text(item, item_limit)
+        if text:
+            items.append(text)
+        if len(items) >= limit:
+            break
+    return items
+
+
 def _pretty_json(value: Any) -> str:
     """Serialise a value to indented JSON for prompt embedding."""
     try:
         return json.dumps(value, indent=2, sort_keys=True)
     except TypeError:
         return json.dumps(str(value), indent=2)
+
+
+def _compact_json(value: Any) -> str:
+    """Serialise a value to compact JSON for prompt embedding."""
+    try:
+        return json.dumps(value, separators=(",", ":"), sort_keys=True)
+    except TypeError:
+        return json.dumps(str(value), separators=(",", ":"))
 
 
 def render_section(title: str, body: str) -> str:
@@ -100,9 +127,15 @@ def build_weak_evidence_section(*, extra_lines: Optional[Sequence[str]] = None) 
 
 def build_submission_summary_section(ingestion: Any, *, submission_kind: str) -> str:
     """Render a compact extracted-summary section from ingestion outputs."""
-    text_preview = _clean_text(_field(ingestion, "text_content", ""), 360)
-    ocr_preview = _clean_text(_field(ingestion, "ocr_text", ""), 220)
-    transcript_preview = _clean_text(_field(ingestion, "audio_transcript", ""), 220)
+    text_preview = _clean_text(
+        _field(ingestion, "text_content", ""),
+        phase10_settings.prompt_submission_summary_chars,
+    )
+    ocr_preview = _clean_text(_field(ingestion, "ocr_text", ""), min(220, phase10_settings.prompt_ocr_chars))
+    transcript_preview = _clean_text(
+        _field(ingestion, "audio_transcript", ""),
+        min(220, phase10_settings.prompt_transcript_chars),
+    )
     tables = _field(ingestion, "tables_json", None)
 
     available_sources: list[str] = []
@@ -137,13 +170,17 @@ def build_submission_summary_section(ingestion: Any, *, submission_kind: str) ->
 def build_submission_evidence_section(
     ingestion: Any,
     *,
-    text_limit: int = 8000,
-    ocr_limit: int = 2500,
-    transcript_limit: int = 2500,
-    table_limit: int = 2500,
+    text_limit: int | None = None,
+    ocr_limit: int | None = None,
+    transcript_limit: int | None = None,
+    table_limit: int | None = None,
 ) -> str:
     """Render the raw extracted evidence block for the model to quote from."""
     blocks: list[str] = []
+    text_limit = text_limit or phase10_settings.prompt_submission_text_chars
+    ocr_limit = ocr_limit or phase10_settings.prompt_ocr_chars
+    transcript_limit = transcript_limit or phase10_settings.prompt_transcript_chars
+    table_limit = table_limit or phase10_settings.prompt_table_chars
 
     text_content = str(_field(ingestion, "text_content", "") or "").strip()
     ocr_text = str(_field(ingestion, "ocr_text", "") or "").strip()
@@ -151,13 +188,13 @@ def build_submission_evidence_section(
     tables = _field(ingestion, "tables_json", None)
 
     if text_content:
-        blocks.append(f"[TEXT]\n{text_content[:text_limit]}")
+        blocks.append(f"[TEXT EXCERPT]\n{_clean_text(text_content, text_limit)}")
     if ocr_text:
-        blocks.append(f"[OCR]\n{ocr_text[:ocr_limit]}")
+        blocks.append(f"[OCR EXCERPT]\n{_clean_text(ocr_text, ocr_limit)}")
     if transcript:
-        blocks.append(f"[TRANSCRIPT]\n{transcript[:transcript_limit]}")
+        blocks.append(f"[TRANSCRIPT EXCERPT]\n{_clean_text(transcript, transcript_limit)}")
     if tables:
-        blocks.append(f"[TABLES]\n{_pretty_json(tables)[:table_limit]}")
+        blocks.append(f"[TABLE SIGNALS]\n{_clean_text(_pretty_json(tables), table_limit)}")
 
     if not blocks:
         blocks.append("(No extracted submission evidence was available.)")
@@ -170,12 +207,13 @@ def build_ml_predictions_section(
     *,
     ml_context_text: str = "",
     ml_raw: Optional[Mapping[str, Any]] = None,
+    include_raw: bool = False,
 ) -> str:
     """Render Phase 6 prediction signals for prompt injection."""
     parts: list[str] = []
     if ml_context_text.strip():
         parts.append(ml_context_text.strip())
-    if ml_raw:
+    if include_raw and ml_raw:
         parts.append("Raw prediction object:\n" + _pretty_json(dict(ml_raw)))
     if not parts:
         parts.append("No Phase 6 prediction signals were available.")
@@ -192,8 +230,14 @@ def build_rag_section(
     confidence_label: Optional[str] = None,
     confidence_score: Optional[float] = None,
     safe_review: Optional[bool] = None,
+    trace: Optional[Mapping[str, Any]] = None,
+    context_limit: int | None = None,
+    citation_limit: int | None = None,
+    chunk_preview_limit: int | None = None,
+    chunk_preview_chars: int | None = None,
 ) -> str:
     """Render the approved retrieved context block."""
+    trace_data = dict(trace or {})
     if not context:
         return render_section(
             title,
@@ -207,7 +251,8 @@ def build_rag_section(
         )
 
     citation_lines = []
-    for fallback_idx, item in enumerate(citations or [], start=1):
+    citation_limit = max(1, citation_limit or phase10_settings.prompt_rag_citation_limit)
+    for fallback_idx, item in enumerate((citations or [])[:citation_limit], start=1):
         idx = _field(item, "index", fallback_idx)
         source = _field(item, "title", _field(item, "source", "Untitled source"))
         section = _field(item, "section", "unknown section")
@@ -216,29 +261,55 @@ def build_rag_section(
         citation_lines.append("No citation metadata was supplied.")
 
     chunk_lines = []
-    for idx, chunk in enumerate((retrieved_chunks or [])[:4], start=1):
+    chunk_preview_limit = max(1, chunk_preview_limit or phase10_settings.prompt_rag_chunk_preview_limit)
+    chunk_preview_chars = max(80, chunk_preview_chars or phase10_settings.prompt_rag_chunk_preview_chars)
+    for idx, chunk in enumerate((retrieved_chunks or [])[:chunk_preview_limit], start=1):
         source = _field(chunk, "document_title", _field(chunk, "source", "Untitled source"))
         section = _field(chunk, "section", "unknown section")
+        category = _field(chunk, "category", "unknown")
         score = _field(chunk, "score", "unknown")
-        chunk_lines.append(f"[Chunk {idx}] {source} | section: {section} | score: {score}")
+        chunk_lines.append(
+            f"[Chunk {idx}] {source} | section: {section} | category: {category} | score: {score}"
+        )
     if not chunk_lines:
         chunk_lines.append("No retrieved chunk metadata was supplied.")
 
     review_flag = bool(safe_review)
     confidence_value = confidence_score if confidence_score is not None else 0.0
+    trace_lines: list[str] = []
+    if trace_data.get("mode"):
+        trace_lines.append(f"- mode: {_clean_text(trace_data.get('mode'), 80)}")
+    keywords = _string_list(trace_data.get("keywords_used"), limit=8, item_limit=60)
+    if keywords:
+        trace_lines.append(f"- keywords_used: {', '.join(keywords)}")
+    selected_titles = _string_list(trace_data.get("selected_titles"), limit=5, item_limit=100)
+    if selected_titles:
+        trace_lines.append(f"- selected_titles: {', '.join(selected_titles)}")
+    final_categories = _string_list(trace_data.get("final_categories"), limit=6, item_limit=60)
+    if final_categories:
+        trace_lines.append(f"- final_categories: {', '.join(final_categories)}")
+    if trace_data.get("degraded_input"):
+        trace_lines.append("- degraded_input: true")
+
+    context_block = _clean_text(context.strip(), context_limit or phase10_settings.prompt_rag_context_chars)
 
     return render_section(
         title,
         "\n".join(
             [
                 "Approved retrieved context:",
-                context.strip(),
+                context_block,
                 "",
                 "Allowed inline citations:",
                 *citation_lines,
                 "",
                 "Retrieved chunk signals:",
                 *chunk_lines,
+                *(
+                    ["", "Retrieval trace summary:", *trace_lines]
+                    if trace_lines
+                    else []
+                ),
                 "",
                 "Retrieval confidence:",
                 f"- label: {confidence_label or 'unknown'}",
@@ -264,7 +335,7 @@ def build_output_schema_section(
     """Render the expected JSON schema contract section."""
     body_parts = [
         "Return exactly one JSON object that matches this shape:",
-        _pretty_json(dict(schema_example)),
+        _compact_json(dict(schema_example)),
     ]
     if field_rules:
         body_parts.extend(

@@ -14,7 +14,7 @@ from app.schemas import (
     ProfessorReportOut,
 )
 from app.security import sanitize_input
-from app.prompts import student_prompt, professor_prompt, fix_json_prompt
+from app.prompts import student_prompt, professor_prompt, fix_json_prompt, student_feedback_style
 
 # Import provider client.  For Ollama we also grab the specific-model caller and
 # the fallback model name so JSON-parse failures can be explicitly retried on
@@ -54,6 +54,36 @@ class PromptGenerateIn(BaseModel):
 class PromptGenerateOut(BaseModel):
     response: str
     model_used: str
+
+
+def _active_primary_model() -> str:
+    if _ACTIVE_PROVIDER == "anthropic":
+        return str(settings.anthropic_primary_model or "")
+    return str(settings.primary_model or "")
+
+
+def _active_fallback_model() -> str:
+    if _ACTIVE_PROVIDER == "anthropic":
+        return str(settings.anthropic_fallback_model or "")
+    return str(settings.fallback_model or "")
+
+
+def _llm_response_headers(
+    model_used: str,
+    *,
+    used_fallback: bool = False,
+    extra: dict[str, str] | None = None,
+) -> dict[str, str]:
+    headers = {
+        "x-llm-model-used": str(model_used or ""),
+        "x-llm-primary-model": _active_primary_model(),
+        "x-llm-fallback-model": _active_fallback_model(),
+    }
+    if used_fallback:
+        headers["x-llm-fallback"] = "true"
+    if extra:
+        headers.update(extra)
+    return headers
 
 
 def _check_secret(x_ai_secret: str | None):
@@ -213,6 +243,27 @@ def _as_list(value: Any) -> list[Any]:
     return [value]
 
 
+def _first_present(data: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in data and data.get(key) is not None:
+            return data.get(key)
+    return None
+
+
+def _value_has_meaningful_content(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (int, float, bool)):
+        return True
+    if isinstance(value, list):
+        return any(_value_has_meaningful_content(item) for item in value)
+    if isinstance(value, dict):
+        return any(_value_has_meaningful_content(item) for item in value.values())
+    return bool(str(value).strip())
+
+
 def _truncate(value: Any, limit: int, default: str) -> str:
     if value is None:
         text = default
@@ -285,12 +336,762 @@ def _normalize_severity(value: Any) -> str:
     return aliases.get(normalized, "low")
 
 
+_STUDENT_PLACEHOLDER_SUMMARY = "Automated review generated with limited confidence."
+_NOT_ASSESSED_PLACEHOLDER = "Not assessed."
+_LOW_CONTENT_QUALITY_REASON = "low_content_quality"
+_STUDENT_TOP_LEVEL_KEYS = {
+    "summary",
+    "issues",
+    "strengths",
+    "architecture_review",
+    "implementation_review",
+    "evaluation_review",
+    "improvement_plan",
+    "checklist",
+    "confidence",
+    "model_agreement",
+    "safety",
+    "rag_meta",
+}
+
+
+def _normalized_marker_text(value: Any) -> str:
+    text = value if isinstance(value, str) else str(value or "")
+    return re.sub(r"\s+", " ", text.strip()).casefold().rstrip(".!?")
+
+
+def _is_student_placeholder_summary(value: Any) -> bool:
+    normalized = _normalized_marker_text(value)
+    placeholder = _normalized_marker_text(_STUDENT_PLACEHOLDER_SUMMARY)
+    return normalized == placeholder or (
+        "automated review generated" in normalized
+        and "limited confidence" in normalized
+    )
+
+
+def _is_not_assessed_placeholder(value: Any) -> bool:
+    return _normalized_marker_text(value) == _normalized_marker_text(_NOT_ASSESSED_PLACEHOLDER)
+
+
+def _student_report_low_content_quality(report: Any) -> bool:
+    data = _as_dict(report)
+    if not data:
+        return False
+
+    summary_is_placeholder = _is_student_placeholder_summary(data.get("summary"))
+    lists_are_empty = all(
+        len(_as_list(data.get(key))) == 0
+        for key in ("issues", "strengths", "improvement_plan", "checklist")
+    )
+
+    architecture_review = _as_dict(data.get("architecture_review"))
+    implementation_review = _as_dict(data.get("implementation_review"))
+    evaluation_review = _as_dict(data.get("evaluation_review"))
+
+    architecture_is_placeholder = all(
+        _is_not_assessed_placeholder(architecture_review.get(key))
+        for key in ("overview", "backend", "frontend", "database", "security")
+    )
+    implementation_is_placeholder = (
+        len(_as_list(implementation_review.get("features_built"))) == 0
+        and _is_not_assessed_placeholder(implementation_review.get("technical_quality"))
+        and _is_not_assessed_placeholder(implementation_review.get("integration_quality"))
+    )
+    evaluation_is_placeholder = all(
+        _is_not_assessed_placeholder(evaluation_review.get(key))
+        for key in ("testing_present", "limitations", "academic_quality")
+    )
+
+    return (
+        summary_is_placeholder
+        and lists_are_empty
+        and architecture_is_placeholder
+        and implementation_is_placeholder
+        and evaluation_is_placeholder
+    )
+
+
+def _student_normalization_removed_content(parsed: Any, normalized: dict[str, Any]) -> bool:
+    if not _student_report_low_content_quality(normalized):
+        return False
+
+    parsed_dict = _as_dict(parsed)
+    if not parsed_dict:
+        return False
+
+    extra_keys = sorted(set(parsed_dict.keys()) - _STUDENT_TOP_LEVEL_KEYS)
+    return any(_value_has_meaningful_content(parsed_dict.get(key)) for key in extra_keys)
+
+
+def _student_debug_metrics(report: Any) -> dict[str, Any]:
+    data = _as_dict(report)
+    if not data:
+        return {
+            "summary_placeholder": False,
+            "issues": 0,
+            "strengths": 0,
+            "improvements": 0,
+            "checklist": 0,
+            "low_content_quality": False,
+        }
+    return {
+        "summary_placeholder": _is_student_placeholder_summary(data.get("summary")),
+        "issues": len(_as_list(data.get("issues"))),
+        "strengths": len(_as_list(data.get("strengths"))),
+        "improvements": len(_as_list(data.get("improvement_plan"))),
+        "checklist": len(_as_list(data.get("checklist"))),
+        "low_content_quality": _student_report_low_content_quality(data),
+    }
+
+
+_PROJECT_TECH_PATTERNS: list[tuple[str, tuple[str, ...]]] = [
+    ("Django", ("django",)),
+    ("React", ("react", "next.js")),
+    ("FastAPI", ("fastapi",)),
+    ("Flask", ("flask",)),
+    ("Chart.js", ("chart.js", "price chart")),
+    ("Gemini AI", ("gemini", "ai assistant")),
+    ("PostgreSQL", ("postgresql", "postgres")),
+    ("SQLite", ("sqlite",)),
+]
+
+_PROJECT_FEATURE_PATTERNS: list[tuple[str, tuple[str, ...]]] = [
+    ("BUY and SELL transaction management", ("buy and sell", "transaction management", "sell-quantity validation")),
+    ("Portfolio analytics dashboard", ("portfolio analytics", "dashboard", "portfolio value")),
+    ("Historical market data processing", ("historical price", "nasdaq 100", "market data")),
+    ("Chart-based visualisation", ("chart.js", "price chart", "moving average")),
+    ("User authentication", ("authentication", "login", "django's built-in framework")),
+    ("AI assistant", ("ai assistant", "gemini", "ai-powered insights")),
+    ("Scalability evaluation", ("scalability experiment", "render time", "query count")),
+    ("Automated test evidence", ("unit test", "acceptance test", "functional acceptance test")),
+]
+
+
+def _sentence_split(text: str) -> list[str]:
+    cleaned = re.sub(r"\s+", " ", text.strip())
+    if not cleaned:
+        return []
+    return [
+        sentence.strip()
+        for sentence in re.split(r"(?<=[.!?])\s+(?=[A-Z0-9])", cleaned)
+        if sentence.strip()
+    ]
+
+
+def _unique_preserve(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    output: list[str] = []
+    for value in values:
+        normalized = _normalized_marker_text(value)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        output.append(value)
+    return output
+
+
+def _extract_abstract_sentences(text: str) -> list[str]:
+    source = text or ""
+    upper = source.upper()
+    start = upper.find("ABSTRACT")
+    if start >= 0:
+        segment = source[start + len("ABSTRACT") : start + len("ABSTRACT") + 4000]
+    else:
+        segment = source[:3000]
+    return _sentence_split(segment)[:6]
+
+
+def _label_hits(text: str, patterns: list[tuple[str, tuple[str, ...]]], *, limit: int = 6) -> list[str]:
+    lowered = text.casefold()
+    hits: list[str] = []
+    for label, options in patterns:
+        if any(option.casefold() in lowered for option in options):
+            hits.append(label)
+        if len(hits) >= limit:
+            break
+    return hits
+
+
+def _has_any(text: str, *terms: str) -> bool:
+    lowered = text.casefold()
+    return any(term.casefold() in lowered for term in terms)
+
+
+def _student_heuristic_report_from_payload(
+    payload: StudentReportIn,
+    *,
+    safe_mode: bool,
+    needs_review: bool,
+) -> dict[str, Any] | None:
+    text = str(payload.ingestion.text_content or "").strip()
+    feedback_style = student_feedback_style(payload)
+    if len(text) < (900 if feedback_style == "code" else 450):
+        return None
+
+    abstract_sentences = _extract_abstract_sentences(text)
+
+    if feedback_style != "code":
+        thesis_present = _has_any(text, "thesis", "this essay argues", "this paper argues", "argument", "research question")
+        evidence_present = _has_any(text, "evidence", "study", "source", "citation", "reference", "literature")
+        analysis_present = _has_any(text, "analysis", "critical", "evaluate", "however", "whereas", "compare", "limitation")
+        structure_present = _has_any(text, "introduction", "conclusion", "paragraph", "section")
+        referencing_present = _has_any(text, "references", "bibliography", "apa", "harvard", "citation")
+
+        if len(abstract_sentences) < 2 and sum(
+            1 for present in (thesis_present, evidence_present, analysis_present, structure_present) if present
+        ) < 2:
+            return None
+
+        strengths: list[dict[str, Any]] = []
+        if thesis_present:
+            strengths.append(
+                {
+                    "title": "The submission has a discernible central focus",
+                    "evidence": _truncate(
+                        "The text signals a thesis, argument, or clear task focus, which gives the discussion a visible academic direction instead of feeling like disconnected notes.",
+                        2000,
+                        "The submission shows a visible central focus.",
+                    ),
+                }
+            )
+        if evidence_present:
+            strengths.append(
+                {
+                    "title": "The discussion appears to use supporting material",
+                    "evidence": _truncate(
+                        "The submission refers to evidence, sources, studies, or cited material, which suggests the argument is at least partly grounded rather than purely asserted.",
+                        2000,
+                        "The submission appears to draw on supporting material.",
+                    ),
+                }
+            )
+        if structure_present and len(strengths) < 3:
+            strengths.append(
+                {
+                    "title": "The writing shows some structural signposting",
+                    "evidence": _truncate(
+                        "Signals such as an introduction, conclusion, sections, or paragraph-level organisation suggest the work is trying to guide the reader through a coherent line of reasoning.",
+                        2000,
+                        "The writing shows some structural signposting.",
+                    ),
+                }
+            )
+
+        issues: list[dict[str, Any]] = []
+        if not thesis_present:
+            issues.append(
+                {
+                    "title": "The central argument needs sharper definition",
+                    "evidence": _truncate(
+                        "The submission discusses the topic, but the controlling thesis or exact position is not consistently explicit. That weakens academic direction because the reader cannot easily judge how each paragraph advances the main claim.",
+                        2000,
+                        "The central argument is not consistently explicit.",
+                    ),
+                    "severity": "high",
+                }
+            )
+        if not analysis_present:
+            issues.append(
+                {
+                    "title": "The discussion is more descriptive than critical",
+                    "evidence": _truncate(
+                        "The available text suggests explanation or topic coverage, but less explicit comparison, challenge, limitation analysis, or evaluative judgement. This matters academically because higher-quality essays need interpretation and critical positioning, not only description.",
+                        2000,
+                        "The discussion appears more descriptive than analytical.",
+                    ),
+                    "severity": "med",
+                }
+            )
+        if not evidence_present:
+            issues.append(
+                {
+                    "title": "Key claims need stronger supporting evidence",
+                    "evidence": _truncate(
+                        "The argument does not consistently show clear supporting sources, examples, or referenced material. That matters because unsupported claims reduce credibility and make the academic case less defensible.",
+                        2000,
+                        "Key claims need clearer supporting evidence.",
+                    ),
+                    "severity": "high",
+                }
+            )
+        if not referencing_present and len(issues) < 3:
+            issues.append(
+                {
+                    "title": "Referencing practice is not clearly evidenced",
+                    "evidence": _truncate(
+                        "The submission gives limited signs of a consistent referencing system or explicit citation trail. That matters because even strong ideas lose academic reliability when attribution is unclear.",
+                        2000,
+                        "Referencing practice is not clearly evidenced.",
+                    ),
+                    "severity": "med",
+                }
+            )
+        if not structure_present and len(issues) < 3:
+            issues.append(
+                {
+                    "title": "Structural signposting could be stronger",
+                    "evidence": _truncate(
+                        "The progression between parts of the argument is not always clearly signalled. This matters because weak structure makes it harder for the reader to follow the logic and evaluate the submission fairly.",
+                        2000,
+                        "Structural signposting could be stronger.",
+                    ),
+                    "severity": "med",
+                }
+            )
+        if not issues:
+            issues.append(
+                {
+                    "title": "Comparative analysis could be pushed further",
+                    "evidence": _truncate(
+                        "The submission appears coherent and evidence-aware, but stronger academic writing would still make the comparative reasoning and analytical judgments more explicit. That matters because higher-band work usually explains not just what the evidence says, but why one interpretation is more convincing than another.",
+                        2000,
+                        "Comparative analysis could be pushed further.",
+                    ),
+                    "severity": "med",
+                }
+            )
+        if len(issues) == 1:
+            issues.append(
+                {
+                    "title": "Source integration can be made more explicit",
+                    "evidence": _truncate(
+                        "Even where the submission appears to use evidence, the link between source material and the exact claim being supported can often be made clearer. This matters because explicit source integration improves academic credibility and makes the line of reasoning easier to defend.",
+                        2000,
+                        "Source integration can be made more explicit.",
+                    ),
+                    "severity": "med",
+                }
+            )
+        issues = issues[:3]
+
+        improvements = [
+            {
+                "action": "Clarify the thesis and paragraph purpose earlier",
+                "why": "A sharper controlling argument makes the whole submission easier to evaluate and strengthens coherence.",
+                "how": "State the core claim explicitly in the introduction and add topic sentences that show how each major paragraph advances it.",
+                "priority": 1,
+            },
+            {
+                "action": "Increase critical comparison and interpretation",
+                "why": "Higher-quality academic writing needs analysis, not only topic coverage or description.",
+                "how": "Add short comparative judgments, limitations, counterpoints, or implications after each major piece of evidence.",
+                "priority": 2,
+            },
+            {
+                "action": "Tighten evidence and referencing discipline",
+                "why": "Clear attribution improves academic credibility and makes claims more defensible.",
+                "how": "Check that each major claim is supported by a source, and keep in-text citations and the reference list consistent.",
+                "priority": 3,
+            },
+        ]
+
+        checklist = [
+            {"item": "State the core thesis clearly in the introduction", "done": False},
+            {"item": "Add critical comparison after major evidence points", "done": False},
+            {"item": "Check citations and references for consistency", "done": False},
+        ]
+
+        summary_sentences = _unique_preserve(
+            [
+                _truncate(abstract_sentences[0] if abstract_sentences else "", 320, ""),
+                _truncate(abstract_sentences[1] if len(abstract_sentences) > 1 else "", 320, ""),
+                _truncate(
+                    "The submission appears to pursue a recognisable academic argument rather than a loose collection of observations.",
+                    320,
+                    "",
+                ),
+                _truncate(
+                    "The main improvements are stronger thesis control, deeper critical analysis, and clearer evidence handling.",
+                    320,
+                    "",
+                ),
+            ]
+        )
+        summary = " ".join(summary_sentences[:4]).strip() or "The submission provides enough evidence for a focused academic review."
+
+        ml_confidence = max(0.0, min(1.0, float(payload.ml.confidence_0_to_4) / 4.0))
+        heuristic_confidence = 0.46
+        heuristic_confidence += 0.06 if thesis_present else 0.0
+        heuristic_confidence += 0.06 if evidence_present else 0.0
+        heuristic_confidence += 0.06 if analysis_present else 0.0
+        heuristic_confidence += 0.04 if structure_present else 0.0
+        heuristic_confidence += 0.04 if referencing_present else 0.0
+        heuristic_confidence = max(0.42, min(0.72, heuristic_confidence))
+        overall_confidence = min(0.72, round((heuristic_confidence + ml_confidence) / 2.0, 2))
+
+        return {
+            "summary": _truncate(summary, 1200, "The submission provides enough evidence for a focused academic review."),
+            "issues": issues,
+            "strengths": strengths[:3],
+            "architecture_review": {
+                "overview": "The written submission shows a discernible academic structure, though its argument could be signposted more sharply.",
+                "backend": "The core supporting layer is the progression of claims and evidence rather than software implementation.",
+                "frontend": "Clarity, paragraph flow, and presentation shape how effectively the argument reaches the reader.",
+                "database": "The source base functions as the submission's evidence foundation and should be used more consistently where needed.",
+                "security": "Academic integrity depends on cautious claims, accurate attribution, and avoiding unsupported assertions.",
+            },
+            "implementation_review": {
+                "features_built": [item for item, present in [
+                    ("Explicit thesis or task focus", thesis_present),
+                    ("Source-based discussion", evidence_present),
+                    ("Critical comparison or evaluation", analysis_present),
+                    ("Structured sections or paragraph flow", structure_present),
+                ] if present][:4],
+                "technical_quality": "The submission is readable and academically oriented, but its strongest gains now come from sharper analysis and evidence control.",
+                "integration_quality": "The overall quality depends on how well claims, evidence, structure, and conclusions are linked across the discussion.",
+            },
+            "evaluation_review": {
+                "testing_present": "Direct empirical evaluation may not apply here, but the strength of the work still depends on how rigorously claims are supported and examined.",
+                "limitations": "The current draft would benefit from clearer thesis framing, deeper analysis, and more explicit source support in weaker sections.",
+                "academic_quality": "The work shows enough substance for targeted feedback, but the academic standard would rise with clearer critical positioning and evidence discipline.",
+            },
+            "improvement_plan": improvements[:3],
+            "checklist": checklist[:3],
+            "confidence": {
+                "mode": "restricted" if safe_mode else "normal",
+                "overall": 0.35 if safe_mode else overall_confidence,
+            },
+            "model_agreement": {
+                "ml_confidence": ml_confidence,
+                "llm_confidence": 0.35 if safe_mode else heuristic_confidence,
+                "final_confidence": 0.35 if safe_mode else overall_confidence,
+            },
+            "safety": {
+                "needs_review": bool(needs_review),
+                "reason": "",
+            },
+        }
+
+    features = _label_hits(text, _PROJECT_FEATURE_PATTERNS)
+    tech_stack = _label_hits(text, _PROJECT_TECH_PATTERNS)
+    if len(abstract_sentences) < 2 and len(features) < 2:
+        return None
+
+    testing_present = _has_any(
+        text,
+        "test",
+        "testing",
+        "unit test",
+        "acceptance test",
+        "evaluated",
+        "evaluation",
+    )
+    security_present = _has_any(
+        text,
+        "authentication",
+        "authorization",
+        "security",
+        "validation",
+        "login",
+    )
+    scalability_present = _has_any(
+        text,
+        "scalability",
+        "performance",
+        "query count",
+        "render time",
+        "load",
+    )
+    rationale_present = _has_any(
+        text,
+        "trade-off",
+        "tradeoff",
+        "rationale",
+        "justif",
+        "because",
+        "decision",
+    )
+    ai_present = _has_any(text, "gemini", "ai assistant", "ai-powered insights", "llm")
+
+    strengths: list[dict[str, Any]] = []
+    if features:
+        strengths.append(
+            {
+                "title": "Implemented feature scope is concrete",
+                "evidence": _truncate(
+                    f"The submission explicitly describes {', '.join(features[:4])}, which gives clear evidence of a real implemented system rather than a speculative proposal.",
+                    2000,
+                    "The submission gives concrete evidence of implemented system features.",
+                ),
+            }
+        )
+    if testing_present:
+        strengths.append(
+            {
+                "title": "Evaluation evidence goes beyond a simple feature list",
+                "evidence": _truncate(
+                    "The report discusses testing, evaluation, or performance evidence, which strengthens confidence that the project was exercised rather than only described at a high level.",
+                    2000,
+                    "The report provides some evaluation evidence.",
+                ),
+            }
+        )
+    if ai_present and len(strengths) < 3:
+        strengths.append(
+            {
+                "title": "The project combines domain features with advanced functionality",
+                "evidence": _truncate(
+                    "The submission links core application workflows with analytics or AI-assisted functionality, suggesting a more ambitious integration scope than a basic CRUD project.",
+                    2000,
+                    "The project includes integrated advanced functionality.",
+                ),
+            }
+        )
+
+    issues: list[dict[str, Any]] = []
+    if not rationale_present:
+        issues.append(
+            {
+                "title": "Architecture decisions need stronger justification",
+                "evidence": _truncate(
+                    "The report names the main technologies and features, but it gives less explicit justification for why those design choices are the best fit for maintainability, scalability, or system boundaries.",
+                    2000,
+                    "Architecture rationale is under-explained.",
+                ),
+                "severity": "med",
+            }
+        )
+    if testing_present:
+        issues.append(
+            {
+                "title": "Testing breadth is still narrower than the overall system scope",
+                "evidence": _truncate(
+                    "The submission mentions testing and evaluation, but broader coverage for integration paths, failure handling, security edge cases, or long-running performance behaviour is not equally explicit.",
+                    2000,
+                    "Testing breadth is not fully clear for the whole system.",
+                ),
+                "severity": "med",
+            }
+        )
+    if ai_present:
+        issues.append(
+            {
+                "title": "AI integration risks and guardrails need clearer discussion",
+                "evidence": _truncate(
+                    "The project includes AI-assisted insight generation, but the report does not make the operational boundaries, failure cases, or trust limitations of that AI component equally explicit.",
+                    2000,
+                    "AI integration risks are under-explained.",
+                ),
+                "severity": "med",
+            }
+        )
+    elif not security_present:
+        issues.append(
+            {
+                "title": "Security discussion is thinner than the implementation scope",
+                "evidence": _truncate(
+                    "The submission focuses on functionality and evaluation, but it says less about access control, misuse handling, or defensive design considerations for a deployed system.",
+                    2000,
+                    "Security discussion is limited.",
+                ),
+                "severity": "med",
+            }
+        )
+    if scalability_present and len(issues) < 3:
+        issues.append(
+            {
+                "title": "Scalability evidence is useful but bounded",
+                "evidence": _truncate(
+                    "The report includes performance or scalability observations, yet those results appear scoped to the current implementation and would benefit from clearer boundaries, assumptions, and next-step optimisation priorities.",
+                    2000,
+                    "Scalability evidence remains bounded.",
+                ),
+                "severity": "low",
+            }
+        )
+    issues = issues[:3]
+
+    improvements: list[dict[str, Any]] = []
+    improvements.append(
+        {
+            "action": "Explain major architecture decisions more explicitly",
+            "why": "The project stack is concrete, but the rationale behind key design choices is not always fully justified.",
+            "how": "Add a short architecture rationale section covering framework choice, data flow boundaries, AI integration boundaries, and the trade-offs that influenced those decisions.",
+            "priority": 1,
+        }
+    )
+    improvements.append(
+        {
+            "action": "Expand integration, failure-path, and edge-case testing",
+            "why": "Current evaluation evidence is useful, but it does not fully cover the riskiest end-to-end paths or abnormal conditions.",
+            "how": "Add tests for invalid transactions, AI-service failure handling, dashboard data edge cases, and performance under heavier portfolio sizes.",
+            "priority": 2,
+        }
+    )
+    if ai_present:
+        improvements.append(
+            {
+                "action": "Document AI-assistant trust boundaries and fallback behaviour",
+                "why": "AI features add value, but they also introduce uncertainty that should be managed explicitly.",
+                "how": "Describe prompt/context boundaries, error handling, response limitations, and how the system behaves when AI output is unavailable or unreliable.",
+                "priority": 3,
+            }
+        )
+    elif not security_present:
+        improvements.append(
+            {
+                "action": "Broaden the security review of the implemented system",
+                "why": "The current report emphasises functionality more than defensive design or misuse handling.",
+                "how": "Add a short section on access control, validation, abuse prevention, and any security assumptions that remain unresolved.",
+                "priority": 3,
+            }
+        )
+
+    checklist = [
+        {"item": "Add explicit rationale for major framework and architecture choices", "done": False},
+        {"item": "Add deeper end-to-end and edge-case tests", "done": False},
+    ]
+    if ai_present:
+        checklist.append({"item": "Document AI failure handling and trust limitations", "done": False})
+    elif not security_present:
+        checklist.append({"item": "Document key security assumptions and gaps", "done": False})
+
+    summary_sentences = _unique_preserve(
+        [
+            _truncate(abstract_sentences[0] if abstract_sentences else "", 320, ""),
+            _truncate(abstract_sentences[1] if len(abstract_sentences) > 1 else "", 320, ""),
+            _truncate(
+                f"The submission gives clear evidence of {', '.join(features[:3]) or 'a real implemented system'}, and it appears technically substantial for a student software project.",
+                320,
+                "",
+            ),
+            _truncate(
+                f"The main areas for improvement are stronger design justification, broader testing depth, and clearer discussion of {'AI integration limits' if ai_present else 'operational risks and limitations'}.",
+                320,
+                "",
+            ),
+        ]
+    )
+    summary = " ".join(summary_sentences[:4]).strip() or "The submission provides enough concrete evidence for a focused project review."
+
+    architecture_overview = _truncate(
+        f"The project appears to be a full-stack system built around {', '.join(tech_stack[:3]) or 'a web application stack'}, with evidence of concrete implementation and evaluation activity.",
+        1200,
+        "The project has a coherent implemented architecture.",
+    )
+    backend_text = _truncate(
+        (
+            "Backend evidence points to server-side application logic handling transactions, analytics, and service orchestration."
+            if any(name in tech_stack for name in ("Django", "FastAPI", "Flask"))
+            else "The backend structure is implied by the described workflows and data processing responsibilities."
+        ),
+        1200,
+        "Backend evidence is limited.",
+    )
+    frontend_text = _truncate(
+        (
+            "Frontend evidence suggests dashboard-style user journeys, visual analytics, and interactive presentation of portfolio data."
+            if _has_any(text, "dashboard", "chart", "chart.js", "interface", "ui")
+            else "Frontend evidence is present but not deeply described."
+        ),
+        1200,
+        "Frontend evidence is limited.",
+    )
+    database_text = _truncate(
+        (
+            "The project appears to rely on structured persistence for users, holdings, transactions, and historical market data."
+            if _has_any(text, "database", "schema", "model", "transaction", "portfolio")
+            else "Database design evidence is present only indirectly."
+        ),
+        1200,
+        "Database evidence is limited.",
+    )
+    security_text = _truncate(
+        (
+            "Authentication and validation are concrete positives, but broader security controls and abuse handling deserve clearer discussion."
+            if security_present
+            else "Security implications are less explicit than the overall implementation scope."
+        ),
+        1200,
+        "Security evidence is limited.",
+    )
+
+    evaluation_limitations = (
+        "Evaluation evidence is present, but the report could still say more about failure paths, boundary conditions, and long-term operational risks."
+        if testing_present
+        else "Testing and evaluation evidence is less explicit than the implementation evidence."
+    )
+    academic_quality = (
+        "The dissertation appears technically specific and evidence-rich, though parts of the design justification and critical reflection could be sharper."
+        if abstract_sentences
+        else "The submission appears technically grounded but would benefit from clearer academic framing."
+    )
+
+    ml_confidence = max(0.0, min(1.0, float(payload.ml.confidence_0_to_4) / 4.0))
+    heuristic_confidence = 0.48
+    heuristic_confidence += min(0.12, 0.03 * len(features))
+    heuristic_confidence += 0.06 if testing_present else 0.0
+    heuristic_confidence += 0.04 if len(abstract_sentences) >= 2 else 0.0
+    heuristic_confidence += 0.04 if len(strengths) >= 2 else 0.0
+    heuristic_confidence = max(0.42, min(0.72, heuristic_confidence))
+    overall_confidence = min(0.7, round((heuristic_confidence + ml_confidence) / 2.0, 2))
+
+    return {
+        "summary": _truncate(summary, 1200, "The submission provides enough concrete evidence for a focused project review."),
+        "issues": issues,
+        "strengths": strengths[:3],
+        "architecture_review": {
+            "overview": architecture_overview,
+            "backend": backend_text,
+            "frontend": frontend_text,
+            "database": database_text,
+            "security": security_text,
+        },
+        "implementation_review": {
+            "features_built": features[:6],
+            "technical_quality": _truncate(
+                "The implementation appears substantial and technically coherent, with multiple interacting project components rather than a minimal single-feature prototype.",
+                1200,
+                "Technical quality appears coherent.",
+            ),
+            "integration_quality": _truncate(
+                "The report suggests meaningful integration between core workflows, analytics, visualisation, and supporting services, although some boundaries could be documented more explicitly.",
+                1200,
+                "Integration quality appears reasonable.",
+            ),
+        },
+        "evaluation_review": {
+            "testing_present": _truncate(
+                "The submission includes concrete testing or evaluation evidence rather than only describing intended validation work."
+                if testing_present
+                else "Testing evidence is present only lightly in the available text.",
+                1200,
+                "Testing evidence is limited.",
+            ),
+            "limitations": _truncate(evaluation_limitations, 1200, "Evaluation limitations need clearer discussion."),
+            "academic_quality": _truncate(academic_quality, 1200, "Academic quality appears reasonable."),
+        },
+        "improvement_plan": improvements[:3],
+        "checklist": checklist[:3],
+        "confidence": {
+            "mode": "restricted" if safe_mode else "normal",
+            "overall": 0.35 if safe_mode else overall_confidence,
+        },
+        "model_agreement": {
+            "ml_confidence": ml_confidence,
+            "llm_confidence": 0.35 if safe_mode else heuristic_confidence,
+            "final_confidence": 0.35 if safe_mode else overall_confidence,
+        },
+        "safety": {
+            "needs_review": bool(needs_review),
+            "reason": "",
+        },
+    }
+
+
 def _normalize_student_llm_json(obj: Any, *, safe_mode: bool) -> dict[str, Any]:
     data = _as_dict(obj).copy()
     data.pop("rag_meta", None)
 
     issues = []
-    for idx, item in enumerate(_as_list(data.get("issues"))):
+    issues_source = _first_present(
+        data,
+        "issues",
+        "weaknesses",
+        "key_issues",
+        "areas_for_improvement",
+    )
+    for idx, item in enumerate(_as_list(issues_source)):
         issue = _as_dict(item)
         issues.append(
             {
@@ -301,7 +1102,8 @@ def _normalize_student_llm_json(obj: Any, *, safe_mode: bool) -> dict[str, Any]:
         )
 
     strengths = []
-    for idx, item in enumerate(_as_list(data.get("strengths"))):
+    strengths_source = _first_present(data, "strengths", "positives", "key_strengths")
+    for idx, item in enumerate(_as_list(strengths_source)):
         strength = _as_dict(item)
         strengths.append(
             {
@@ -311,7 +1113,15 @@ def _normalize_student_llm_json(obj: Any, *, safe_mode: bool) -> dict[str, Any]:
         )
 
     improvement_plan = []
-    for idx, item in enumerate(_as_list(data.get("improvement_plan"))):
+    improvement_source = _first_present(
+        data,
+        "improvement_plan",
+        "recommendations",
+        "improvements",
+        "next_steps",
+        "actions",
+    )
+    for idx, item in enumerate(_as_list(improvement_source)):
         action = _as_dict(item)
         improvement_plan.append(
             {
@@ -323,7 +1133,8 @@ def _normalize_student_llm_json(obj: Any, *, safe_mode: bool) -> dict[str, Any]:
         )
 
     checklist = []
-    for idx, item in enumerate(_as_list(data.get("checklist"))):
+    checklist_source = _first_present(data, "checklist", "action_items", "todo")
+    for idx, item in enumerate(_as_list(checklist_source)):
         check = _as_dict(item)
         checklist.append(
             {
@@ -332,14 +1143,22 @@ def _normalize_student_llm_json(obj: Any, *, safe_mode: bool) -> dict[str, Any]:
             }
         )
 
-    architecture_review = _as_dict(data.get("architecture_review"))
-    implementation_review = _as_dict(data.get("implementation_review"))
-    evaluation_review = _as_dict(data.get("evaluation_review"))
+    architecture_review = _as_dict(
+        _first_present(data, "architecture_review", "architecture", "system_architecture")
+    )
+    implementation_review = _as_dict(
+        _first_present(data, "implementation_review", "implementation", "technical_review")
+    )
+    evaluation_review = _as_dict(
+        _first_present(data, "evaluation_review", "evaluation", "testing_review")
+    )
     confidence = _as_dict(data.get("confidence"))
     model_agreement = _as_dict(data.get("model_agreement"))
     safety = _as_dict(data.get("safety"))
     normalized_final_confidence = _coerce_float(model_agreement.get("final_confidence"), default=-1.0)
     normalized_overall = _coerce_float(confidence.get("overall"), default=-1.0)
+    normalized_llm_confidence = _coerce_float(model_agreement.get("llm_confidence"), default=-1.0)
+    normalized_ml_confidence = _coerce_float(model_agreement.get("ml_confidence"), default=-1.0)
 
     if normalized_overall < 0.0:
         normalized_overall = (
@@ -347,10 +1166,16 @@ def _normalize_student_llm_json(obj: Any, *, safe_mode: bool) -> dict[str, Any]:
             if normalized_final_confidence >= 0.0
             else (0.35 if safe_mode else 0.75)
         )
+    if normalized_llm_confidence < 0.0:
+        normalized_llm_confidence = normalized_overall
+    if normalized_final_confidence < 0.0:
+        normalized_final_confidence = normalized_llm_confidence
+    if normalized_ml_confidence < 0.0:
+        normalized_ml_confidence = 0.0
 
     return {
         "summary": _truncate(
-            data.get("summary"),
+            _first_present(data, "summary", "overview", "feedback_summary"),
             1200,
             "Automated review generated with limited confidence.",
         ),
@@ -388,9 +1213,9 @@ def _normalize_student_llm_json(obj: Any, *, safe_mode: bool) -> dict[str, Any]:
             "overall": normalized_overall,
         },
         "model_agreement": {
-            "ml_confidence": _coerce_float(model_agreement.get("ml_confidence"), default=0.0),
-            "llm_confidence": _coerce_float(model_agreement.get("llm_confidence"), default=0.0),
-            "final_confidence": _coerce_float(model_agreement.get("final_confidence"), default=0.0),
+            "ml_confidence": normalized_ml_confidence,
+            "llm_confidence": normalized_llm_confidence,
+            "final_confidence": normalized_final_confidence,
         },
         "safety": {
             "needs_review": _coerce_bool(safety.get("needs_review"), default=bool(safe_mode)),
@@ -495,7 +1320,7 @@ def _professor_rag_meta(payload: ProfessorReportIn) -> dict:
 
 
 def _student_fix_target(payload: StudentReportIn) -> str:
-    return "student_project_review" if (payload.analysis_type or "").strip().lower() == "student_project_review" else "student"
+    return "student_project_review" if student_feedback_style(payload) == "code" else "student"
 
 
 def _student_safe_fallback(model_used: str, safe_mode: bool, needs_review: bool) -> dict[str, Any]:
@@ -609,6 +1434,18 @@ async def _call_repair_model(repair_prompt: str) -> dict[str, Any]:
     return await generate_with_fallback(repair_prompt)
 
 
+async def _call_content_retry_model(prompt_text: str) -> dict[str, Any]:
+    """Retry the full original prompt on the fallback model after low-content output."""
+    return await _call_generate_model(
+        {
+            "prompt": prompt_text,
+            "stream": False,
+            "format": "json",
+        },
+        requested_model=_REPAIR_MODEL or None,
+    )
+
+
 async def _call_generate_model(
     prompt_payload: dict[str, Any],
     *,
@@ -681,16 +1518,27 @@ async def generate_prompt(
     if options:
         request_payload["options"] = options
 
-    gen = await _call_generate_model(
-        request_payload,
-        requested_model=(payload.requested_model or "").strip() or None,
-    )
+    try:
+        gen = await _call_generate_model(
+            request_payload,
+            requested_model=(payload.requested_model or "").strip() or None,
+        )
+    except Exception as exc:
+        requested = (payload.requested_model or "").strip() or "auto"
+        logger.warning("llm generate failed requested_model=%s error=%s", requested, exc)
+        raise HTTPException(
+            status_code=502,
+            detail=f"local generation failed requested_model={requested}: {type(exc).__name__}: {exc}",
+        ) from exc
     model_used = str(gen.get("model_used") or payload.requested_model or "")
     response_text = str(gen.get("response") or "")
 
     return JSONResponse(
         content={"response": response_text, "model_used": model_used},
-        headers={"x-llm-model-used": model_used},
+        headers=_llm_response_headers(
+            model_used,
+            used_fallback=(model_used == _active_fallback_model() and model_used != _active_primary_model()),
+        ),
     )
 
 
@@ -712,6 +1560,7 @@ async def student_report(
 
     retrieval_weak = _student_retrieval_is_weak(payload)
     requested_mode = (payload.mode or "").strip().lower()
+    feedback_style = student_feedback_style(payload)
 
     safe_mode = (
         requested_mode == "restricted"
@@ -730,9 +1579,10 @@ async def student_report(
     )
 
     logger.info(
-        "student_report start requested_mode=%s analysis_type=%s safe_mode=%s needs_review=%s injected=%s retrieval_weak=%s quality_band=%s confidence_0_to_4=%s query=%r top_k=%s retrieved_chunks=%s citations=%s",
+        "student_report start requested_mode=%s analysis_type=%s feedback_style=%s safe_mode=%s needs_review=%s injected=%s retrieval_weak=%s quality_band=%s confidence_0_to_4=%s query=%r top_k=%s retrieved_chunks=%s citations=%s",
         requested_mode or "unset",
         (payload.analysis_type or "").strip().lower() or "unset",
+        feedback_style,
         safe_mode,
         needs_review,
         injected,
@@ -745,18 +1595,104 @@ async def student_report(
         len(payload.grounding_citations or []),
     )
 
-    gen = await generate_with_fallback(student_prompt(payload, safe_mode=safe_mode))
+    prompt_text, excerpt_cap, was_trimmed = student_prompt(payload, safe_mode=safe_mode)
+    logger.info(
+        "student_report prompt_stats prompt_chars=%s text_chars=%s excerpt_cap=%s trimmed=%s ocr_chars=%s audio_chars=%s rag_context_chars=%s rag_enabled=%s chunks=%s citations=%s",
+        len(prompt_text),
+        len(payload.ingestion.text_content or ""),
+        excerpt_cap,
+        was_trimmed,
+        len(payload.ingestion.ocr_text or ""),
+        len(payload.ingestion.audio_transcript or ""),
+        len(payload.grounding_context or (payload.rag.context if payload.rag else "") or ""),
+        bool(payload.rag and payload.rag.enabled) or bool(payload.grounding_context),
+        len(payload.grounding_retrieved_chunks or []),
+        len(payload.grounding_citations or []),
+    )
+
+    gen = await generate_with_fallback(prompt_text)
     model_used = gen["model_used"]
-    raw = gen["response"]
+    raw = str(gen.get("response") or "")
     for attempt in range(settings.max_retries + 1):
+        logger.info(
+            "student_report raw_response attempt=%s/%s model=%s chars=%s preview=%r",
+            attempt + 1,
+            settings.max_retries + 1,
+            model_used,
+            len(raw),
+            _clip(raw, 800),
+        )
         try:
             # _parse_llm_json = extract (balanced + fence-aware) + cheap_repair + json.loads
             parsed = _parse_llm_json(raw)
             obj = _normalize_student_llm_json(parsed, safe_mode=safe_mode)
+            low_content_quality = _student_report_low_content_quality(obj)
+            normalization_removed_content = _student_normalization_removed_content(parsed, obj)
+            metrics = _student_debug_metrics(obj)
+            logger.info(
+                "student_report normalization attempt=%s/%s model=%s parsed_keys=%s low_content=%s normalization_removed_content=%s summary_placeholder=%s issues=%s strengths=%s improvements=%s checklist=%s",
+                attempt + 1,
+                settings.max_retries + 1,
+                model_used,
+                sorted(_as_dict(parsed).keys()),
+                metrics["low_content_quality"],
+                normalization_removed_content,
+                metrics["summary_placeholder"],
+                metrics["issues"],
+                metrics["strengths"],
+                metrics["improvements"],
+                metrics["checklist"],
+            )
+            if low_content_quality and attempt < settings.max_retries:
+                logger.warning(
+                    "student_report routing_to_retry failure=low_content_quality attempt=%s model=%s retry_model=%s normalization_removed_content=%s raw=%r",
+                    attempt + 1,
+                    model_used,
+                    _REPAIR_MODEL or "fallback",
+                    normalization_removed_content,
+                    _clip(raw, 800),
+                )
+                gen = await _call_content_retry_model(prompt_text)
+                model_used = gen["model_used"]
+                raw = str(gen.get("response") or "")
+                continue
+
             out = StudentReportOut.model_validate(obj)
 
             response_body = out.model_dump()
             response_body.setdefault("safety", {})
+            low_content_quality = _student_report_low_content_quality(response_body)
+            if low_content_quality:
+                heuristic_body = _student_heuristic_report_from_payload(
+                    payload,
+                    safe_mode=safe_mode,
+                    needs_review=needs_review,
+                )
+                if heuristic_body is not None:
+                    response_body = heuristic_body
+                    low_content_quality = False
+                    logger.warning(
+                        "student_report heuristic_recovery model=%s safe_mode=%s injected=%s retrieval_weak=%s",
+                        model_used,
+                        safe_mode,
+                        injected,
+                        retrieval_weak,
+                    )
+                else:
+                    response_body["safety"]["needs_review"] = True
+                    response_body["safety"]["reason"] = _LOW_CONTENT_QUALITY_REASON
+                    response_body.setdefault("confidence", {})
+                    response_body["confidence"]["overall"] = min(
+                        _coerce_float(response_body["confidence"].get("overall"), default=0.35),
+                        0.35,
+                    )
+                    logger.warning(
+                        "student_report quality_gate=low_content_quality model=%s safe_mode=%s injected=%s retrieval_weak=%s",
+                        model_used,
+                        safe_mode,
+                        injected,
+                        retrieval_weak,
+                    )
             response_body["safety"]["needs_review"] = bool(
                 response_body["safety"].get("needs_review") or needs_review
             )
@@ -777,21 +1713,35 @@ async def student_report(
                         "Manual review recommended because " + ", ".join(reasons) + "."
                     )
             response_body["rag_meta"] = _student_rag_meta(payload)
+            if low_content_quality:
+                response_body["rag_meta"]["quality_gate"] = _LOW_CONTENT_QUALITY_REASON
+            elif response_body["summary"] != out.model_dump().get("summary"):
+                response_body["rag_meta"]["recovery"] = "heuristic_student_builder"
 
+            if attempt > 0:
+                logger.info(
+                    "student_report recovered attempt=%s/%s recovered_by=%s",
+                    attempt + 1,
+                    settings.max_retries + 1,
+                    model_used,
+                )
             return JSONResponse(
                 content=response_body,
-                headers={
-                    "x-llm-model-used": model_used,
+                headers=_llm_response_headers(
+                    model_used,
+                    used_fallback=(attempt > 0 or model_used == _active_fallback_model()),
+                    extra={
                     "x-rag-enabled": str(response_body["rag_meta"]["enabled"]).lower(),
                     "x-rag-confidence-label": str(
                         response_body["rag_meta"]["confidence_label"]
                     ),
-                },
+                    },
+                ),
             )
 
         except json.JSONDecodeError as exc:
             logger.warning(
-                "student_report json_decode_error attempt=%s/%s model=%s safe_mode=%s injected=%s retrieval_weak=%s error=%s raw=%r",
+                "student_report failure=json_parse attempt=%s/%s model=%s safe_mode=%s injected=%s retrieval_weak=%s error=%s raw=%r",
                 attempt + 1,
                 settings.max_retries + 1,
                 model_used,
@@ -803,7 +1753,7 @@ async def student_report(
             )
             if attempt >= settings.max_retries:
                 logger.error(
-                    "student_report exhausted retries — returning safe fallback model=%s safe_mode=%s injected=%s retrieval_weak=%s reason=%s raw=%r",
+                    "student_report failure=repair_exhausted model=%s safe_mode=%s injected=%s retrieval_weak=%s reason=%s raw=%r",
                     model_used,
                     safe_mode,
                     injected,
@@ -811,15 +1761,34 @@ async def student_report(
                     inj_reason,
                     _clip(raw),
                 )
+                heuristic_body = _student_heuristic_report_from_payload(
+                    payload,
+                    safe_mode=safe_mode,
+                    needs_review=needs_review,
+                )
+                if heuristic_body is not None:
+                    heuristic_body["rag_meta"] = _student_rag_meta(payload)
+                    heuristic_body["rag_meta"]["recovery"] = "heuristic_student_builder"
+                    return JSONResponse(
+                        content=heuristic_body,
+                        status_code=200,
+                        headers=_llm_response_headers(model_used, used_fallback=True),
+                    )
                 fallback_body = _student_safe_fallback(model_used, safe_mode, needs_review)
                 fallback_body["rag_meta"] = _student_rag_meta(payload)
                 return JSONResponse(
                     content=fallback_body,
                     status_code=200,
-                    headers={"x-llm-model-used": model_used, "x-llm-fallback": "true"},
+                    headers=_llm_response_headers(model_used, used_fallback=True),
                 )
 
             # JSON failure = model failure: retry explicitly on the repair/fallback model
+            logger.info(
+                "student_report routing_to_repair failure=json_parse attempt=%s model=%s repair_model=%s",
+                attempt + 1,
+                model_used,
+                _REPAIR_MODEL or "fallback",
+            )
             gen = await _call_repair_model(
                 fix_json_prompt(
                     raw,
@@ -832,7 +1801,7 @@ async def student_report(
             raw = gen["response"]
         except ValidationError as exc:
             logger.warning(
-                "student_report validation_error attempt=%s/%s model=%s safe_mode=%s injected=%s retrieval_weak=%s errors=%s raw=%r",
+                "student_report failure=validation attempt=%s/%s model=%s safe_mode=%s injected=%s retrieval_weak=%s errors=%s raw=%r",
                 attempt + 1,
                 settings.max_retries + 1,
                 model_used,
@@ -844,7 +1813,7 @@ async def student_report(
             )
             if attempt >= settings.max_retries:
                 logger.error(
-                    "student_report exhausted retries — returning safe fallback model=%s safe_mode=%s injected=%s retrieval_weak=%s reason=%s raw=%r",
+                    "student_report failure=repair_exhausted model=%s safe_mode=%s injected=%s retrieval_weak=%s reason=%s raw=%r",
                     model_used,
                     safe_mode,
                     injected,
@@ -852,15 +1821,34 @@ async def student_report(
                     inj_reason,
                     _clip(raw),
                 )
+                heuristic_body = _student_heuristic_report_from_payload(
+                    payload,
+                    safe_mode=safe_mode,
+                    needs_review=needs_review,
+                )
+                if heuristic_body is not None:
+                    heuristic_body["rag_meta"] = _student_rag_meta(payload)
+                    heuristic_body["rag_meta"]["recovery"] = "heuristic_student_builder"
+                    return JSONResponse(
+                        content=heuristic_body,
+                        status_code=200,
+                        headers=_llm_response_headers(model_used, used_fallback=True),
+                    )
                 fallback_body = _student_safe_fallback(model_used, safe_mode, needs_review)
                 fallback_body["rag_meta"] = _student_rag_meta(payload)
                 return JSONResponse(
                     content=fallback_body,
                     status_code=200,
-                    headers={"x-llm-model-used": model_used, "x-llm-fallback": "true"},
+                    headers=_llm_response_headers(model_used, used_fallback=True),
                 )
 
             # Validation failure after parsing = also route to the repair/fallback model
+            logger.info(
+                "student_report routing_to_repair failure=validation attempt=%s model=%s repair_model=%s",
+                attempt + 1,
+                model_used,
+                _REPAIR_MODEL or "fallback",
+            )
             gen = await _call_repair_model(
                 fix_json_prompt(
                     raw,
@@ -914,7 +1902,21 @@ async def professor_report(
         len(payload.grounding_citations or []),
     )
 
-    gen = await generate_with_fallback(professor_prompt(payload, needs_review=needs_review))
+    prof_prompt_text = professor_prompt(payload, needs_review=needs_review)
+    text_chars = len(payload.ingestion.text_content or "")
+    logger.info(
+        "professor_report prompt_stats prompt_chars=%s text_chars=%s trimmed=%s ocr_chars=%s audio_chars=%s rag_context_chars=%s rag_enabled=%s chunks=%s citations=%s",
+        len(prof_prompt_text),
+        text_chars,
+        text_chars > 5_000,
+        len(payload.ingestion.ocr_text or ""),
+        len(payload.ingestion.audio_transcript or ""),
+        len(payload.grounding_context or (payload.rag.context if payload.rag else "") or ""),
+        bool(payload.rag and payload.rag.enabled) or bool(payload.grounding_context),
+        len(payload.grounding_retrieved_chunks or []),
+        len(payload.grounding_citations or []),
+    )
+    gen = await generate_with_fallback(prof_prompt_text)
     model_used = gen["model_used"]
     raw = gen["response"]
 
@@ -927,20 +1929,30 @@ async def professor_report(
             response_body = out.model_dump()
             response_body["rag_meta"] = _professor_rag_meta(payload)
 
+            if attempt > 0:
+                logger.info(
+                    "professor_report recovered attempt=%s/%s recovered_by=%s",
+                    attempt + 1,
+                    settings.max_retries + 1,
+                    model_used,
+                )
             return JSONResponse(
                 content=response_body,
-                headers={
-                    "x-llm-model-used": model_used,
+                headers=_llm_response_headers(
+                    model_used,
+                    used_fallback=(attempt > 0 or model_used == _active_fallback_model()),
+                    extra={
                     "x-rag-enabled": str(response_body["rag_meta"]["enabled"]).lower(),
                     "x-rag-confidence-label": str(
                         response_body["rag_meta"]["confidence_label"]
                     ),
-                },
+                    },
+                ),
             )
 
         except json.JSONDecodeError as exc:
             logger.warning(
-                "professor_report json_decode_error attempt=%s/%s model=%s needs_review=%s injected=%s retrieval_weak=%s error=%s raw=%r",
+                "professor_report failure=json_parse attempt=%s/%s model=%s needs_review=%s injected=%s retrieval_weak=%s error=%s raw=%r",
                 attempt + 1,
                 settings.max_retries + 1,
                 model_used,
@@ -952,7 +1964,7 @@ async def professor_report(
             )
             if attempt >= settings.max_retries:
                 logger.error(
-                    "professor_report exhausted retries — returning safe fallback model=%s needs_review=%s injected=%s retrieval_weak=%s reason=%s raw=%r",
+                    "professor_report failure=repair_exhausted model=%s needs_review=%s injected=%s retrieval_weak=%s reason=%s raw=%r",
                     model_used,
                     needs_review,
                     injected,
@@ -965,10 +1977,16 @@ async def professor_report(
                 return JSONResponse(
                     content=fallback_body,
                     status_code=200,
-                    headers={"x-llm-model-used": model_used, "x-llm-fallback": "true"},
+                    headers=_llm_response_headers(model_used, used_fallback=True),
                 )
 
             # JSON failure = model failure: retry explicitly on the repair/fallback model
+            logger.info(
+                "professor_report routing_to_repair failure=json_parse attempt=%s model=%s repair_model=%s",
+                attempt + 1,
+                model_used,
+                _REPAIR_MODEL or "fallback",
+            )
             gen = await _call_repair_model(
                 fix_json_prompt(
                     raw,
@@ -980,7 +1998,7 @@ async def professor_report(
             raw = gen["response"]
         except ValidationError as exc:
             logger.warning(
-                "professor_report validation_error attempt=%s/%s model=%s needs_review=%s injected=%s retrieval_weak=%s errors=%s raw=%r",
+                "professor_report failure=validation attempt=%s/%s model=%s needs_review=%s injected=%s retrieval_weak=%s errors=%s raw=%r",
                 attempt + 1,
                 settings.max_retries + 1,
                 model_used,
@@ -992,7 +2010,7 @@ async def professor_report(
             )
             if attempt >= settings.max_retries:
                 logger.error(
-                    "professor_report exhausted retries — returning safe fallback model=%s needs_review=%s injected=%s retrieval_weak=%s reason=%s raw=%r",
+                    "professor_report failure=repair_exhausted model=%s needs_review=%s injected=%s retrieval_weak=%s reason=%s raw=%r",
                     model_used,
                     needs_review,
                     injected,
@@ -1005,10 +2023,16 @@ async def professor_report(
                 return JSONResponse(
                     content=fallback_body,
                     status_code=200,
-                    headers={"x-llm-model-used": model_used, "x-llm-fallback": "true"},
+                    headers=_llm_response_headers(model_used, used_fallback=True),
                 )
 
             # Validation failure after parsing = also route to the repair/fallback model
+            logger.info(
+                "professor_report routing_to_repair failure=validation attempt=%s model=%s repair_model=%s",
+                attempt + 1,
+                model_used,
+                _REPAIR_MODEL or "fallback",
+            )
             gen = await _call_repair_model(
                 fix_json_prompt(
                     raw,

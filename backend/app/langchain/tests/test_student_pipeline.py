@@ -75,7 +75,7 @@ async def test_student_pipeline_happy_path():
                 enabled=False, context="", instruction="",
                 citations=[], retrieved_chunks=[],
                 confidence_score=0.0, confidence_label="low",
-                safe_review=False, trace={},
+                safe_review=False, trace={"mode": "code", "selected_titles": ["Project Guide"], "final_categories": ["software_engineering"]},
             )),
         ),
         patch(
@@ -102,9 +102,13 @@ async def test_student_pipeline_happy_path():
     assert result["model_used"] == "claude-sonnet-4-6"
     assert result["validation_status"]["valid"] is True
     assert result["execution_metadata"]["role"] == "student"
+    assert result["execution_metadata"]["chain_name"] == "phase10_student_generation"
+    assert result["execution_metadata"]["retrieval_mode"] == "code"
+    assert result["execution_metadata"]["selected_doc_titles"] == ["Project Guide"]
     assert result["decision_source"] == "hybrid"
     assert result["storage_payload"]["role"] == "student"
     assert "report_json" in result["storage_payload"]
+    assert result["storage_payload"]["model_versions"]["retrieval_debug"]["mode"] == "code"
 
 
 @pytest.mark.asyncio
@@ -265,3 +269,47 @@ async def test_student_pipeline_weak_retrieval_and_low_confidence_short_circuits
     assert result["execution_mode"] == "fallback"
     assert result["decision_source"] == "fallback"
     assert result["validation_status"]["stage"] == "retrieve"
+
+
+@pytest.mark.asyncio
+async def test_student_pipeline_records_prompt_trimming_for_long_inputs():
+    long_ingestion = {
+        **SAMPLE_INGESTION,
+        "text_content": "Architecture evidence " * 500,
+    }
+
+    with (
+        patch(
+            "app.langchain.services.student_pipeline.run_with_fallback",
+            new_callable=AsyncMock,
+            return_value=(VALID_STUDENT_REPORT, "mistral"),
+        ),
+        patch(
+            "app.langchain.services.student_pipeline.pack_student_rag",
+            return_value=(long_ingestion, MagicMock(
+                enabled=True,
+                context="Retrieved grounding " * 300,
+                instruction="Use grounded evidence.",
+                citations=[],
+                retrieved_chunks=[],
+                confidence_score=0.72,
+                confidence_label="medium",
+                safe_review=False,
+                weak_retrieval=False,
+                trace={"mode": "essay", "packaging_trimmed": True},
+            )),
+        ),
+        patch("app.langchain.services.student_pipeline.get_primary_model", return_value=MagicMock()),
+        patch("app.langchain.services.student_pipeline.build_generation_chain", return_value=MagicMock()),
+    ):
+        pipeline = StudentPipeline()
+        result = await pipeline.run(
+            file_id="file-6",
+            submission_id="sub-6",
+            ingestion_dict=long_ingestion,
+            ml_dict=SAMPLE_ML,
+            submission_kind="academic",
+        )
+
+    assert result["execution_metadata"]["prompt_trimmed"] is True
+    assert result["storage_payload"]["model_versions"]["prompt_debug"]["trimmed"] is True
