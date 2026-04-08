@@ -1,0 +1,181 @@
+{
+  "name": "EduAI — Admin Model Usage Audit v2",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": { "interval": [{ "field": "cronExpression", "expression": "0 2 * * *" }] }
+      },
+      "id": "wf014a-0001",
+      "name": "Daily 02:00 UTC",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [200, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env['BACKEND_INTERNAL_URL'] }}/internal/admin/workflow-metrics",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "X-Internal-Secret", "value": "={{ $env['BACKEND_INTERNAL_SECRET'] }}" }
+          ]
+        },
+        "options": { "response": { "response": { "fullResponse": false } }, "timeout": 10000 }
+      },
+      "id": "wf014a-0002",
+      "name": "Fetch Workflow Metrics",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [440, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Compute daily provider usage summary from Redis metric counters\nconst metrics = $input.first().json.metrics || {};\nconst today = new Date();\ntoday.setUTCDate(today.getUTCDate() - 1);\nconst dateStr = today.toISOString().split('T')[0];\n\n// Helper to read counter with default 0\nconst m = (key) => parseInt(metrics[key] || '0', 10);\nconst mf = (key) => parseFloat(metrics[key] || '0');\n\nconst openaiCalls   = m('assessment.openai.calls')   + m('assessment.student.completed') + m('assessment.professor.completed');\nconst openaiTokens  = m('assessment.openai.tokens')  || 0;\nconst openaiCost    = mf('assessment.openai.cost_usd') || 0;\n\nconst claudeCalls   = openaiCalls; // Claude always mirrors OpenAI (1:1)\nconst claudeTokens  = m('assessment.claude.tokens')  || 0;\nconst claudeCost    = mf('assessment.claude.cost_usd') || 0;\n\nconst geminiCalls   = m('assessment.gemini.calls')   || 0;\nconst geminiTokens  = m('assessment.gemini.tokens')  || 0;\nconst geminiCost    = mf('assessment.gemini.cost_usd') || 0;\n\nconst studentCompleted  = m('assessment.student.completed');\nconst professorCompleted = m('assessment.professor.completed');\nconst escalations       = m('assessment.escalations.created');\nconst duplicates        = m('assessment.student.duplicate') + m('assessment.professor.duplicate');\nconst totalCost         = openaiCost + claudeCost + geminiCost;\n\nreturn [{ json: {\n  date_utc:            dateStr,\n  openai_calls:        openaiCalls,\n  openai_tokens:       openaiTokens,\n  openai_cost_usd:     openaiCost,\n  claude_calls:        claudeCalls,\n  claude_tokens:       claudeTokens,\n  claude_cost_usd:     claudeCost,\n  gemini_calls:        geminiCalls,\n  gemini_tokens:       geminiTokens,\n  gemini_cost_usd:     geminiCost,\n  total_cost_usd:      totalCost,\n  student_completed:   studentCompleted,\n  professor_completed: professorCompleted,\n  escalations_created: escalations,\n  duplicates_rejected: duplicates,\n  raw_metrics:         metrics,\n} }];"
+      },
+      "id": "wf014a-0003",
+      "name": "Compute Daily Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env['BACKEND_INTERNAL_URL'] }}/internal/assessment/metric",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type",      "value": "application/json" },
+            { "name": "X-Internal-Secret", "value": "={{ $env['BACKEND_INTERNAL_SECRET'] }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\"metric\": \"admin.daily_audit_run\", \"value\": 1}",
+        "options": { "timeout": 5000 }
+      },
+      "id": "wf014a-0004",
+      "name": "Record Audit Run Metric",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [920, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Log the daily summary as a structured audit event\n// In production: POST to /internal/assessment/usage-summary (future endpoint)\n// or write directly to Supabase assessment_daily_usage table.\nconst summary = $node['Compute Daily Summary'].json;\nconsole.log(JSON.stringify({\n  level: 'info',\n  event: 'assessment_audit.daily_usage',\n  ...summary,\n}));\n\n// Check if cost exceeds budget threshold (configurable)\nconst DAILY_BUDGET_USD = parseFloat($env['ASSESSMENT_DAILY_BUDGET_USD'] || '50');\nconst over_budget = summary.total_cost_usd > DAILY_BUDGET_USD;\nif (over_budget) {\n  console.error(JSON.stringify({\n    level: 'error',\n    event: 'assessment_audit.budget_exceeded',\n    total_cost_usd: summary.total_cost_usd,\n    budget_usd: DAILY_BUDGET_USD,\n    date_utc: summary.date_utc,\n  }));\n}\n\nreturn [{ json: { ...summary, over_budget, budget_usd: DAILY_BUDGET_USD } }];"
+      },
+      "id": "wf014a-0005",
+      "name": "Log and Check Budget",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1160, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [{ "value1": "={{ $json.over_budget }}", "value2": true }]
+        }
+      },
+      "id": "wf014a-0006",
+      "name": "Over Budget?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1400, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env['BACKEND_INTERNAL_URL'] }}/internal/escalations/notify",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type",      "value": "application/json" },
+            { "name": "X-Internal-Secret", "value": "={{ $env['BACKEND_INTERNAL_SECRET'] }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ escalation_id: 'budget-alert-' + $json.date_utc, resume_url: '', severity: 'high', confidence: 1.0, file_id: '', user_id: 'system', role: 'admin' }) }}",
+        "options": { "timeout": 10000 }
+      },
+      "id": "wf014a-0007",
+      "name": "Send Budget Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1640, 180]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env['BACKEND_INTERNAL_URL'] }}/internal/assessment/metric",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type",      "value": "application/json" },
+            { "name": "X-Internal-Secret", "value": "={{ $env['BACKEND_INTERNAL_SECRET'] }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\"metric\": \"admin.budget_alerts_sent\", \"value\": 1}"
+      },
+      "id": "wf014a-0008",
+      "name": "Metric: Budget Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1880, 180]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Audit complete — log final summary\nconst s = $node['Log and Check Budget'].json;\nconsole.log(JSON.stringify({\n  level: 'info',\n  event: 'assessment_audit.complete',\n  date_utc: s.date_utc,\n  total_cost_usd: s.total_cost_usd,\n  student_completed: s.student_completed,\n  professor_completed: s.professor_completed,\n  escalations_created: s.escalations_created,\n}));\nreturn [{ json: { ok: true, date_utc: s.date_utc } }];"
+      },
+      "id": "wf014a-0009",
+      "name": "Audit Complete",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1640, 420]
+    }
+  ],
+  "connections": {
+    "Daily 02:00 UTC": {
+      "main": [[{ "node": "Fetch Workflow Metrics", "type": "main", "index": 0 }]]
+    },
+    "Fetch Workflow Metrics": {
+      "main": [[{ "node": "Compute Daily Summary", "type": "main", "index": 0 }]]
+    },
+    "Compute Daily Summary": {
+      "main": [[{ "node": "Record Audit Run Metric", "type": "main", "index": 0 }]]
+    },
+    "Record Audit Run Metric": {
+      "main": [[{ "node": "Log and Check Budget", "type": "main", "index": 0 }]]
+    },
+    "Log and Check Budget": {
+      "main": [[{ "node": "Over Budget?", "type": "main", "index": 0 }]]
+    },
+    "Over Budget?": {
+      "main": [
+        [{ "node": "Audit Complete",    "type": "main", "index": 0 }],
+        [{ "node": "Send Budget Alert", "type": "main", "index": 0 }]
+      ]
+    },
+    "Send Budget Alert": {
+      "main": [[{ "node": "Metric: Budget Alert", "type": "main", "index": 0 }]]
+    },
+    "Metric: Budget Alert": {
+      "main": [[{ "node": "Audit Complete", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": {
+    "errorWorkflow": "",
+    "executionOrder": "v1"
+  },
+  "tags": [
+    { "name": "phase14" },
+    { "name": "v2" },
+    { "name": "assessment" },
+    { "name": "admin" },
+    { "name": "audit" }
+  ]
+}

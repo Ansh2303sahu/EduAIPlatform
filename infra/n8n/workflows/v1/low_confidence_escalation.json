@@ -1,0 +1,219 @@
+{
+  "name": "EduAI — Low-Confidence Escalation v2",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "low-confidence-alert",
+        "options": { "rawBody": true },
+        "responseMode": "responseNode"
+      },
+      "id": "wf002v2-0001",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [200, 300],
+      "webhookId": "eduai-low-confidence-v2"
+    },
+    {
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\n\nconst HMAC_SECRET   = $env['N8N_WEBHOOK_HMAC_SECRET'];\nconst MAX_SKEW_SECS = 300;\n\nconst item    = $input.first();\nconst headers = item.json.headers || {};\n\nconst sigHeader = headers['x-eduai-signature-256']   || '';\nconst tsHeader  = headers['x-eduai-timestamp']       || '';\nconst idempKey  = headers['x-eduai-idempotency-key'] || '';\n\nconst nowSecs = Math.floor(Date.now() / 1000);\nconst tsSecs  = parseInt(tsHeader, 10);\nif (isNaN(tsSecs) || Math.abs(nowSecs - tsSecs) > MAX_SKEW_SECS) {\n  throw new Error(`Timestamp rejected: skew=${nowSecs - tsSecs}s`);\n}\n\nconst rawBody  = item.json.rawBody || JSON.stringify(item.json.body);\nconst expected = 'sha256=' + crypto.createHmac('sha256', HMAC_SECRET).update(rawBody, 'utf8').digest('hex');\nconst sigBuf = Buffer.from(sigHeader);\nconst expBuf = Buffer.from(expected);\nif (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {\n  throw new Error('Signature verification failed');\n}\n\nconst body = typeof rawBody === 'string' ? JSON.parse(rawBody) : rawBody;\nreturn [{ json: { ...body, _idempotency_key: idempKey, _verified: true } }];"
+      },
+      "id": "wf002v2-0002",
+      "name": "Verify HMAC Signature",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── Deliverable 2: Role Isolation ──────────────────────────────────────────\n// Low-confidence events are emitted for student and professor AI analyses.\n// Admin and system roles do not generate AI report outputs.\nconst ALLOWED_ROLES = ['student', 'professor'];\n\nconst item = $input.first();\nconst role = (item.json.payload || {}).role || '';\n\nif (!ALLOWED_ROLES.includes(role)) {\n  console.error(JSON.stringify({\n    level: 'error', message: 'role_rejected',\n    role, allowed: ALLOWED_ROLES,\n    event_id: item.json.event_id,\n  }));\n  throw new Error(`Role '${role}' is not permitted in the low-confidence workflow. Allowed: ${ALLOWED_ROLES.join(', ')}`);\n}\n\nreturn [{ json: { ...item.json, _role_validated: true } }];"
+      },
+      "id": "wf002v2-0003",
+      "name": "Validate Role",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse the low-confidence event and classify severity tier.\n// critical  : confidence < 0.25  — human review required (HITL)\n// high      : 0.25 <= confidence < 0.35  — escalation to professor/admin\n// moderate  : 0.35 <= confidence < 0.45  — flag in report, no interrupt\nconst item    = $input.first();\nconst payload = item.json.payload || {};\n\nconst confidence  = typeof payload.confidence_score === 'number' ? payload.confidence_score : 0;\nconst threshold   = typeof payload.confidence_threshold === 'number' ? payload.confidence_threshold : 0.45;\nconst delta       = threshold - confidence;\n\nlet severity, escalation_required;\nif (confidence < 0.25) {\n  severity = 'critical'; escalation_required = true;\n} else if (confidence < 0.35) {\n  severity = 'high';     escalation_required = true;\n} else {\n  severity = 'moderate'; escalation_required = false;\n}\n\nconsole.log(JSON.stringify({\n  level: 'info', message: 'low_confidence_classified',\n  event_id:       item.json.event_id,\n  confidence,\n  threshold,\n  severity,\n  escalation_required,\n}));\n\nreturn [{\n  json: {\n    event_id:        item.json.event_id,\n    correlation_id:  item.json.correlation_id,\n    payload,\n    severity,\n    confidence,\n    threshold,\n    delta:           Math.round(delta * 1000) / 1000,\n    escalation_required,\n    _idempotency_key: item.json._idempotency_key,\n  }\n}];"
+      },
+      "id": "wf002v2-0004",
+      "name": "Parse + Classify Confidence",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [920, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": false },
+          "conditions": [
+            {
+              "id": "escalation-check",
+              "leftValue": "={{ $json.escalation_required }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equals" }
+            }
+          ]
+        }
+      },
+      "id": "wf002v2-0005",
+      "name": "Escalation Required?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1160, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build the escalation record sent to the backend.\n// For critical severity the HITL workflow should be triggered separately.\nconst item    = $input.first();\nconst payload = item.json.payload || {};\n\nconst record = {\n  id:             `esc-${item.json.event_id}`,\n  created_at:     new Date().toISOString(),\n  event_id:       item.json.event_id,\n  correlation_id: item.json.correlation_id,\n  file_id:        payload.file_id  || '',\n  user_id:        payload.user_id  || '',\n  role:           payload.role     || '',\n  confidence:     item.json.confidence,\n  threshold:      item.json.threshold,\n  delta:          item.json.delta,\n  severity:       item.json.severity,\n  model_id:       payload.model_id || '',\n  safe_mode:      payload.safe_mode || false,\n  requires_review: item.json.severity === 'critical',\n  status:         'open',\n};\n\nreturn [{ json: { escalation: record, severity: item.json.severity, event_id: item.json.event_id } }];"
+      },
+      "id": "wf002v2-0006",
+      "name": "Build Escalation Record",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1400, 180]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env['BACKEND_INTERNAL_URL'] }}/internal/escalations",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type",      "value": "application/json" },
+            { "name": "X-Internal-Secret", "value": "={{ $env['BACKEND_INTERNAL_SECRET'] }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ escalation: $json.escalation }) }}",
+        "options": {
+          "response": { "response": { "fullResponse": true } },
+          "timeout": 10000,
+          "retry": { "enabled": true, "maxTries": 2, "waitBetweenTries": 2000 }
+        }
+      },
+      "id": "wf002v2-0007",
+      "name": "POST Escalation to Backend",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1640, 180],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env['BACKEND_INTERNAL_URL'] }}/internal/events/metric",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type",      "value": "application/json" },
+            { "name": "X-Internal-Secret", "value": "={{ $env['BACKEND_INTERNAL_SECRET'] }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ metric: 'low_confidence.escalated.' + $('Build Escalation Record').item.json.severity, value: 1 }) }}",
+        "options": { "timeout": 3000 }
+      },
+      "id": "wf002v2-0008",
+      "name": "Metric: escalated",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1880, 180],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first();\nconsole.log(JSON.stringify({\n  level: 'info', message: 'low_confidence_accepted_no_escalation',\n  event_id:       item.json.event_id,\n  confidence:     item.json.confidence,\n  severity:       item.json.severity,\n}));\nreturn [{ json: { status: 'accepted_no_escalation', ...item.json } }];"
+      },
+      "id": "wf002v2-0009",
+      "name": "Log Confidence OK",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1400, 420]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env['BACKEND_INTERNAL_URL'] }}/internal/events/metric",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type",      "value": "application/json" },
+            { "name": "X-Internal-Secret", "value": "={{ $env['BACKEND_INTERNAL_SECRET'] }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"metric\": \"low_confidence.received\", \"value\": 1 }",
+        "options": { "timeout": 3000 }
+      },
+      "id": "wf002v2-0010",
+      "name": "Metric: received",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1640, 420],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ status: 'accepted', event_id: $('Verify HMAC Signature').item.json.event_id, escalated: $('Escalation Required?').item.json.escalation_required }) }}",
+        "options": { "responseCode": 202 }
+      },
+      "id": "wf002v2-0011",
+      "name": "Respond 202 Accepted",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [2120, 300]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [[{ "node": "Verify HMAC Signature", "type": "main", "index": 0 }]]
+    },
+    "Verify HMAC Signature": {
+      "main": [[{ "node": "Validate Role", "type": "main", "index": 0 }]]
+    },
+    "Validate Role": {
+      "main": [[{ "node": "Parse + Classify Confidence", "type": "main", "index": 0 }]]
+    },
+    "Parse + Classify Confidence": {
+      "main": [[{ "node": "Escalation Required?", "type": "main", "index": 0 }]]
+    },
+    "Escalation Required?": {
+      "main": [
+        [{ "node": "Log Confidence OK",        "type": "main", "index": 0 }],
+        [{ "node": "Build Escalation Record",   "type": "main", "index": 0 }]
+      ]
+    },
+    "Build Escalation Record": {
+      "main": [[{ "node": "POST Escalation to Backend", "type": "main", "index": 0 }]]
+    },
+    "POST Escalation to Backend": {
+      "main": [[{ "node": "Metric: escalated", "type": "main", "index": 0 }]]
+    },
+    "Metric: escalated": {
+      "main": [[{ "node": "Respond 202 Accepted", "type": "main", "index": 0 }]]
+    },
+    "Log Confidence OK": {
+      "main": [[{ "node": "Metric: received", "type": "main", "index": 0 }]]
+    },
+    "Metric: received": {
+      "main": [[{ "node": "Respond 202 Accepted", "type": "main", "index": 0 }]]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "errorWorkflow": ""
+  },
+  "active": false,
+  "versionId": "eduai-low-confidence-v2-0",
+  "id": "wf-low-confidence-escalation-v2",
+  "tags": ["phase13", "events", "v2", "role-isolation", "escalation"]
+}

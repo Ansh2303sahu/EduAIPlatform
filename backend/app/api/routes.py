@@ -22,6 +22,7 @@ from app.api.progress import router as progress_router
 from app.api.rag_admin import router as rag_admin_router
 from app.api.rag_retrieve import router as rag_retrieve_router
 from app.api.llm_reports import router as llm_reports_router
+from app.api.ai_generate import router as ai_generate_router
 from app.api.mcp import router as mcp_router
 from app.langchain.config import phase10_settings
 from app.langchain.routers.student import (
@@ -252,6 +253,7 @@ api_router.include_router(admin_router)
 api_router.include_router(rag_admin_router)
 api_router.include_router(rag_retrieve_router)
 api_router.include_router(llm_reports_router)
+api_router.include_router(ai_generate_router)
 # Phase 11 — MCP tool layer.  Always included; the endpoint itself checks
 # mcp_settings.enabled so the feature can be toggled at runtime.
 import app.mcp  # noqa: F401, E402 — triggers tool registration as a side-effect

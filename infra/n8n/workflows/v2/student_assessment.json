@@ -1,0 +1,449 @@
+{
+  "name": "EduAI — Student Multi-Model Assessment v2",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ai-assessment-student",
+        "options": { "rawBody": true },
+        "responseMode": "responseNode"
+      },
+      "id": "wf014s-0001",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [200, 300],
+      "webhookId": "eduai-assessment-student-v2"
+    },
+    {
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\n\nconst HMAC_SECRET   = $env['N8N_WEBHOOK_HMAC_SECRET'];\nconst MAX_SKEW_SECS = 300;\n\nconst item = $input.first();\nconst root = item.json || {};\nconst headers = (root.headers && typeof root.headers === 'object') ? root.headers : {};\nconst availableHeaderKeys = Object.keys(headers);\n\nfunction readHeader(name) {\n  const variants = [name, name.toLowerCase(), name.toUpperCase()];\n  for (const key of variants) {\n    const value = headers[key] ?? root[key];\n    if (Array.isArray(value) && value.length > 0) return String(value[0]);\n    if (typeof value === 'string' || typeof value === 'number') return String(value);\n  }\n  return '';\n}\n\nconst sigHeader = readHeader('X-EduAI-Signature-256');\nconst tsHeader  = readHeader('X-EduAI-Timestamp');\nconst idempKey  = readHeader('X-EduAI-Idempotency-Key');\n\nif (!sigHeader) {\n  throw new Error(`Missing X-EduAI-Signature-256; available header keys: ${availableHeaderKeys.join(', ') || '(none)'}`);\n}\nif (!tsHeader) {\n  throw new Error(`Missing X-EduAI-Timestamp; available header keys: ${availableHeaderKeys.join(', ') || '(none)'}`);\n}\n\nconst nowSecs = Math.floor(Date.now() / 1000);\nconst tsSecs  = parseInt(tsHeader, 10);\nif (isNaN(tsSecs) || Math.abs(nowSecs - tsSecs) > MAX_SKEW_SECS) {\n  throw new Error(`Timestamp rejected: skew=${nowSecs - tsSecs}s`);\n}\n\nconst rawBody  = typeof root.rawBody === 'string' ? root.rawBody : JSON.stringify(root.body || root.payload || root);\nconst expected = 'sha256=' + crypto.createHmac('sha256', HMAC_SECRET).update(rawBody, 'utf8').digest('hex');\nconst sigBuf = Buffer.from(sigHeader);\nconst expBuf = Buffer.from(expected);\nif (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {\n  throw new Error('Signature verification failed');\n}\n\nconst body = typeof rawBody === 'string' ? JSON.parse(rawBody) : rawBody;\nreturn [{ json: { ...body, _idempotency_key: idempKey, _verified: true } }];"
+      },
+      "id": "wf014s-0002",
+      "name": "Verify HMAC",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const ALLOWED_ROLES = ['student'];\nconst item = $input.first();\nconst role = (item.json.payload || {}).role || '';\nif (!ALLOWED_ROLES.includes(role)) {\n  throw new Error(`Role '${role}' rejected in student assessment workflow.`);\n}\nreturn [{ json: { ...item.json, _role_validated: true } }];"
+      },
+      "id": "wf014s-0003",
+      "name": "Validate Role (student)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env['BACKEND_INTERNAL_URL'] }}/internal/idempotency/check",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type",      "value": "application/json" },
+            { "name": "X-Internal-Secret", "value": "={{ $env['BACKEND_INTERNAL_SECRET'] }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ event_id: $json.event_id, ttl_seconds: 86400 }) }}",
+        "options": { "response": { "response": { "fullResponse": false } }, "timeout": 5000 }
+      },
+      "id": "wf014s-0004",
+      "name": "Check Idempotency",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [920, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [{ "value1": "={{ $json.fresh }}", "value2": true }]
+        }
+      },
+      "id": "wf014s-0005",
+      "name": "Is Duplicate?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1160, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env['BACKEND_INTERNAL_URL'] }}/internal/assessment/metric",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type",      "value": "application/json" },
+            { "name": "X-Internal-Secret", "value": "={{ $env['BACKEND_INTERNAL_SECRET'] }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\"metric\": \"student.duplicate\", \"value\": 1}"
+      },
+      "id": "wf014s-0006",
+      "name": "Metric: Duplicate",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1400, 180]
+    },
+    {
+      "parameters": {
+        "options": { "responseCode": 200 },
+        "respondWith": "json",
+        "responseBody": "={\"status\": \"duplicate\", \"event_id\": $json.event_id}"
+      },
+      "id": "wf014s-0007",
+      "name": "Respond 200 Duplicate",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1640, 180]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env['BACKEND_INTERNAL_URL'] }}/internal/assessment/rubric-context",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type",      "value": "application/json" },
+            { "name": "X-Internal-Secret", "value": "={{ $env['BACKEND_INTERNAL_SECRET'] }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ file_id: $json.payload.file_id, submission_id: $json.payload.submission_id || '', user_id: $json.payload.user_id, role: 'student', include_draft: true }) }}",
+        "options": { "response": { "response": { "fullResponse": false } }, "timeout": 10000 }
+      },
+      "id": "wf014s-0008",
+      "name": "Fetch Rubric Context",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1400, 420]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.has_images || $json.has_tables || $json.has_code_blocks }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "wf014s-0009",
+      "name": "Has Multimodal?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1640, 420]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpQueryAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'You are an academic assessment specialist. Analyse the following submission metadata and extract insights from any visual content (diagrams, charts, code). Context: ' + JSON.stringify($node['Fetch Rubric Context'].json) + ' Submission payload: ' + JSON.stringify($node['Verify HMAC'].json.payload) + ' Return JSON with: multimodal_used, figures (array of {figure_id, figure_type, description, quality_score}), additional_context, visual_issues, visual_strengths, usage.' }] }], generationConfig: { responseMimeType: 'application/json' } }) }}",
+        "options": { "timeout": 30000 }
+      },
+      "id": "wf014s-0010",
+      "name": "Call Gemini",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1880, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Gemini skipped — return a null extraction result\nreturn [{ json: { multimodal_used: false, skip_reason: 'no_media_content', figures: [], additional_context: '', visual_issues: [], visual_strengths: [], usage: { model: 'gemini-1.5-pro', prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, latency_ms: 0, cost_usd: 0 } } }];"
+      },
+      "id": "wf014s-0011",
+      "name": "Skip Gemini",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1880, 540]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type",  "value": "application/json" },
+            { "name": "Authorization", "value": "=Bearer {{ $env['OPENAI_API_KEY'] }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'gpt-4o', response_format: { type: 'json_object' }, messages: [ { role: 'system', content: 'You are an expert academic assessor. Assess the student submission according to the provided rubric. Return JSON with: rubric_scores (array of {criterion, band, score, justification, evidence_quotes}), overall_grade, overall_score (0-100), summary (max 800 chars), strengths (array of {title, evidence}), issues (array of {title, evidence, severity: low|med|high}), improvement_plan (array of {action, why, how, priority 1-10}), confidence (0-1), needs_human_review, safety_flags.' }, { role: 'user', content: 'Rubric context: ' + JSON.stringify($node['Fetch Rubric Context'].json) + '\\n\\nSubmission: ' + JSON.stringify($node['Verify HMAC'].json.payload) } ] }) }}",
+        "options": { "timeout": 60000 }
+      },
+      "id": "wf014s-0012",
+      "name": "Call OpenAI (Primary)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [2120, 420]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type",      "value": "application/json" },
+            { "name": "x-api-key",         "value": "={{ $env['ANTHROPIC_API_KEY'] }}" },
+            { "name": "anthropic-version",  "value": "2023-06-01" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 2048, system: 'You are an expert academic assessment reviewer. Review the OpenAI assessment for logical consistency, hallucinations, and unsupported claims. Return JSON with: consistent (bool), reviewer_confidence (0-1), concerns (array of strings), corrections (array of {field_path, original_value, suggested_value, reason}), flagged_for_hitl (bool), hitl_reason (string), overall_verdict (approved|needs_correction|escalate).', messages: [{ role: 'user', content: 'Rubric context: ' + JSON.stringify($node['Fetch Rubric Context'].json) + '\\n\\nOpenAI assessment to review: ' + JSON.stringify($node['Call OpenAI (Primary)'].json.choices[0].message.content) }] }) }}",
+        "options": { "timeout": 45000 }
+      },
+      "id": "wf014s-0013",
+      "name": "Call Claude (Reviewer)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [2360, 420]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse provider responses and compute gate decision\nconst openaiRaw = $node['Call OpenAI (Primary)'].json;\nconst claudeRaw = $node['Call Claude (Reviewer)'].json;\nconst geminiData = $node['Call Gemini'] ? $node['Call Gemini'].json : $node['Skip Gemini'].json;\n\nlet openaiResult;\ntry {\n  const content = openaiRaw.choices[0].message.content;\n  openaiResult = typeof content === 'string' ? JSON.parse(content) : content;\n} catch (e) {\n  throw new Error('Failed to parse OpenAI response: ' + e.message);\n}\n\nlet claudeResult;\ntry {\n  const content = claudeRaw.content[0].text;\n  claudeResult = typeof content === 'string' ? JSON.parse(content) : content;\n} catch (e) {\n  throw new Error('Failed to parse Claude response: ' + e.message);\n}\n\nconst openaiConfidence = openaiResult.confidence || 0;\nconst claudeVerdict = claudeResult.overall_verdict || 'approved';\nconst needsHumanReview = openaiResult.needs_human_review || false;\nconst safetyFlags = openaiResult.safety_flags || [];\n\nconst escalationReasons = [];\nif (openaiConfidence < 0.40) escalationReasons.push('openai_confidence_low: ' + openaiConfidence);\nif (claudeVerdict === 'escalate') escalationReasons.push('claude_verdict_escalate');\nif (needsHumanReview) escalationReasons.push('openai_needs_human_review');\nif (safetyFlags.length > 0) escalationReasons.push('safety_flags: ' + safetyFlags.join(','));\n\nconst shouldEscalate = escalationReasons.length > 0;\nconst finalConfidence = (openaiConfidence + (claudeResult.reviewer_confidence || 0)) / 2;\n\nconst gateDecision = {\n  pass_gate: !shouldEscalate,\n  escalate: shouldEscalate,\n  hitl_required: shouldEscalate,\n  escalation_reasons: escalationReasons,\n  final_confidence: finalConfidence,\n  confidence_sources: { openai: openaiConfidence, claude: claudeResult.reviewer_confidence || 0 },\n  decided_at: new Date().toISOString(),\n};\n\nconst openaiUsage = openaiRaw.usage || {};\nconst openaiStats = {\n  model: 'gpt-4o',\n  prompt_tokens: openaiUsage.prompt_tokens || 0,\n  completion_tokens: openaiUsage.completion_tokens || 0,\n  total_tokens: openaiUsage.total_tokens || 0,\n  latency_ms: 0,\n  cost_usd: ((openaiUsage.prompt_tokens || 0) * 0.000005 + (openaiUsage.completion_tokens || 0) * 0.000015),\n};\n\nconst claudeUsage = claudeRaw.usage || {};\nconst claudeStats = {\n  model: 'claude-sonnet-4-6',\n  prompt_tokens: claudeUsage.input_tokens || 0,\n  completion_tokens: claudeUsage.output_tokens || 0,\n  total_tokens: (claudeUsage.input_tokens || 0) + (claudeUsage.output_tokens || 0),\n  latency_ms: 0,\n  cost_usd: ((claudeUsage.input_tokens || 0) * 0.000003 + (claudeUsage.output_tokens || 0) * 0.000015),\n};\n\nopenaiResult.usage = openaiStats;\nclaudeResult.usage = claudeStats;\n\nconst idempotencyKey = $node['Verify HMAC'].json._idempotency_key || $node['Verify HMAC'].json.event_id;\nconst eventPayload = $node['Verify HMAC'].json.payload || {};\n\nreturn [{ json: {\n  event_id: idempotencyKey,\n  file_id: eventPayload.file_id,\n  submission_id: eventPayload.submission_id || '',\n  user_id: eventPayload.user_id,\n  openai_result: openaiResult,\n  claude_review: claudeResult,\n  gemini_extraction: geminiData,\n  gate_decision: gateDecision,\n  _should_escalate: shouldEscalate,\n  _escalation_reasons: escalationReasons,\n  _openai_confidence: openaiConfidence,\n  _claude_verdict: claudeVerdict,\n} }];"
+      },
+      "id": "wf014s-0014",
+      "name": "Compute Gate Decision",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2600, 420]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [{ "value1": "={{ $json._should_escalate }}", "value2": true }]
+        }
+      },
+      "id": "wf014s-0015",
+      "name": "Should Escalate?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [2840, 420]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env['BACKEND_INTERNAL_URL'] }}/internal/assessment/escalate",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type",      "value": "application/json" },
+            { "name": "X-Internal-Secret", "value": "={{ $env['BACKEND_INTERNAL_SECRET'] }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ event_id: $json.event_id + '-esc', n8n_execution_id: $execution.id, n8n_resume_url: $execution.resumeUrl, file_id: $json.file_id, submission_id: $json.submission_id, user_id: $json.user_id, role: 'student', reasons: $json._escalation_reasons, openai_confidence: $json._openai_confidence, claude_verdict: $json._claude_verdict, severity: $json._openai_confidence < 0.25 ? 'critical' : $json._openai_confidence < 0.35 ? 'high' : 'medium' }) }}",
+        "options": { "timeout": 10000 }
+      },
+      "id": "wf014s-0016",
+      "name": "Create Escalation",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [3080, 300]
+    },
+    {
+      "parameters": {
+        "options": { "responseCode": 202 },
+        "respondWith": "json",
+        "responseBody": "={\"status\": \"escalated\", \"escalation_id\": $node['Create Escalation'].json.escalation_id}"
+      },
+      "id": "wf014s-0017",
+      "name": "Respond 202 Escalated",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [3080, 180]
+    },
+    {
+      "parameters": { "resume": "webhook" },
+      "id": "wf014s-0018",
+      "name": "Wait for HITL Decision",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1,
+      "position": [3320, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const decision = ($input.first().json.body || {}).decision || 'rejected';\nif (!['approved', 'rejected'].includes(decision)) {\n  throw new Error(`Invalid HITL decision: ${decision}`);\n}\nreturn [{ json: { ...$node['Compute Gate Decision'].json, _hitl_decision: decision, _hitl_approved: decision === 'approved' } }];"
+      },
+      "id": "wf014s-0019",
+      "name": "Parse HITL Decision",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3560, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [{ "value1": "={{ $json._hitl_approved }}", "value2": true }]
+        }
+      },
+      "id": "wf014s-0020",
+      "name": "HITL Approved?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [3800, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env['BACKEND_INTERNAL_URL'] }}/internal/assessment/submit-result",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type",      "value": "application/json" },
+            { "name": "X-Internal-Secret", "value": "={{ $env['BACKEND_INTERNAL_SECRET'] }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ event_id: $json.event_id, n8n_execution_id: $execution.id, file_id: $json.file_id, submission_id: $json.submission_id, user_id: $json.user_id, role: 'student', openai_result: $json.openai_result, claude_review: $json.claude_review, gemini_extraction: $json.gemini_extraction, gate_decision: $json.gate_decision, workflow_version: 'v2' }) }}",
+        "options": { "timeout": 15000 }
+      },
+      "id": "wf014s-0021",
+      "name": "Submit Result",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [3080, 540]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env['BACKEND_INTERNAL_URL'] }}/internal/assessment/metric",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type",      "value": "application/json" },
+            { "name": "X-Internal-Secret", "value": "={{ $env['BACKEND_INTERNAL_SECRET'] }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\"metric\": \"student.completed\", \"value\": 1}"
+      },
+      "id": "wf014s-0022",
+      "name": "Metric: Completed",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [3320, 540]
+    },
+    {
+      "parameters": {
+        "options": { "responseCode": 202 },
+        "respondWith": "json",
+        "responseBody": "={\"status\": \"processed\", \"assessment_id\": $node['Submit Result'].json.assessment_id}"
+      },
+      "id": "wf014s-0023",
+      "name": "Respond 202 OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [3560, 540]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [[{ "node": "Verify HMAC", "type": "main", "index": 0 }]]
+    },
+    "Verify HMAC": {
+      "main": [[{ "node": "Validate Role (student)", "type": "main", "index": 0 }]]
+    },
+    "Validate Role (student)": {
+      "main": [[{ "node": "Check Idempotency", "type": "main", "index": 0 }]]
+    },
+    "Check Idempotency": {
+      "main": [[{ "node": "Is Duplicate?", "type": "main", "index": 0 }]]
+    },
+    "Is Duplicate?": {
+      "main": [
+        [{ "node": "Fetch Rubric Context", "type": "main", "index": 0 }],
+        [{ "node": "Metric: Duplicate",    "type": "main", "index": 0 }]
+      ]
+    },
+    "Metric: Duplicate": {
+      "main": [[{ "node": "Respond 200 Duplicate", "type": "main", "index": 0 }]]
+    },
+    "Fetch Rubric Context": {
+      "main": [[{ "node": "Has Multimodal?", "type": "main", "index": 0 }]]
+    },
+    "Has Multimodal?": {
+      "main": [
+        [{ "node": "Call Gemini",  "type": "main", "index": 0 }],
+        [{ "node": "Skip Gemini", "type": "main", "index": 0 }]
+      ]
+    },
+    "Call Gemini": {
+      "main": [[{ "node": "Call OpenAI (Primary)", "type": "main", "index": 0 }]]
+    },
+    "Skip Gemini": {
+      "main": [[{ "node": "Call OpenAI (Primary)", "type": "main", "index": 0 }]]
+    },
+    "Call OpenAI (Primary)": {
+      "main": [[{ "node": "Call Claude (Reviewer)", "type": "main", "index": 0 }]]
+    },
+    "Call Claude (Reviewer)": {
+      "main": [[{ "node": "Compute Gate Decision", "type": "main", "index": 0 }]]
+    },
+    "Compute Gate Decision": {
+      "main": [[{ "node": "Should Escalate?", "type": "main", "index": 0 }]]
+    },
+    "Should Escalate?": {
+      "main": [
+        [{ "node": "Submit Result",         "type": "main", "index": 0 }],
+        [{ "node": "Create Escalation",     "type": "main", "index": 0 }]
+      ]
+    },
+    "Create Escalation": {
+      "main": [[{ "node": "Wait for HITL Decision", "type": "main", "index": 0 }]]
+    },
+    "Wait for HITL Decision": {
+      "main": [[{ "node": "Parse HITL Decision", "type": "main", "index": 0 }]]
+    },
+    "Parse HITL Decision": {
+      "main": [[{ "node": "HITL Approved?", "type": "main", "index": 0 }]]
+    },
+    "HITL Approved?": {
+      "main": [
+        [{ "node": "Submit Result",       "type": "main", "index": 0 }],
+        [{ "node": "Respond 202 Escalated", "type": "main", "index": 0 }]
+      ]
+    },
+    "Submit Result": {
+      "main": [[{ "node": "Metric: Completed", "type": "main", "index": 0 }]]
+    },
+    "Metric: Completed": {
+      "main": [[{ "node": "Respond 202 OK", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": {
+    "errorWorkflow": "",
+    "executionOrder": "v1"
+  },
+  "tags": [
+    { "name": "phase14" },
+    { "name": "v2" },
+    { "name": "assessment" },
+    { "name": "student" }
+  ]
+}

@@ -1,0 +1,248 @@
+{
+  "name": "EduAI — Failed Pipeline Retry & Dead-Letter",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "pipeline-failure",
+        "options": { "rawBody": true },
+        "responseMode": "responseNode"
+      },
+      "id": "c3d4e5f6-0003-0001-0003-c3d4e5f60001",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [200, 300],
+      "webhookId": "eduai-pipeline-failure-v1"
+    },
+    {
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\n\nconst HMAC_SECRET   = $env['N8N_WEBHOOK_HMAC_SECRET'];\nconst MAX_SKEW_SECS = 300;\n\nconst item    = $input.first();\nconst headers = item.json.headers || {};\n\nconst sigHeader = headers['x-eduai-signature-256']   || '';\nconst tsHeader  = headers['x-eduai-timestamp']       || '';\nconst idempKey  = headers['x-eduai-idempotency-key'] || '';\n\nconst nowSecs = Math.floor(Date.now() / 1000);\nconst tsSecs  = parseInt(tsHeader, 10);\nif (isNaN(tsSecs) || Math.abs(nowSecs - tsSecs) > MAX_SKEW_SECS) {\n  throw new Error(`Timestamp rejected: skew=${nowSecs - tsSecs}s`);\n}\n\nconst rawBody  = item.json.rawBody || JSON.stringify(item.json.body);\nconst expected = 'sha256=' + crypto.createHmac('sha256', HMAC_SECRET).update(rawBody, 'utf8').digest('hex');\nconst sigBuf = Buffer.from(sigHeader);\nconst expBuf = Buffer.from(expected);\nif (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {\n  throw new Error('Signature verification failed');\n}\n\nconst body = typeof rawBody === 'string' ? JSON.parse(rawBody) : rawBody;\nreturn [{ json: { ...body, _idempotency_key: idempKey, _verified: true } }];"
+      },
+      "id": "c3d4e5f6-0003-0002-0003-c3d4e5f60002",
+      "name": "Verify HMAC Signature",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================\n// Retry State Manager\n//\n// Uses workflow static data to track retry attempts per file_id.\n// Each incoming failure event increments the counter.\n// After MAX_ATTEMPTS the job is routed to the dead-letter handler.\n//\n// Static data survives across executions for this workflow instance.\n// For a clustered n8n deployment, replace with a shared Redis counter\n// via HTTP Request to a sidecar or directly via a Redis node.\n// ============================================================\n\nconst MAX_ATTEMPTS = 3;\nconst RETRY_WINDOW_MS = 30 * 60 * 1000; // reset counter after 30 min of silence\n\nconst item    = $input.first();\nconst payload = item.json.payload || {};\n\nconst fileId       = payload.file_id       || '';\nconst userId       = payload.user_id       || '';\nconst role         = payload.role          || '';\nconst submissionId = payload.submission_id || '';\nconst failureReasons = payload.failure_reasons || [];\nconst failureCode  = payload.failure_code  || 'unknown';\nconst pipeline     = payload.pipeline      || 'phase12_langgraph';\nconst graphName    = payload.graph_name    || '';\nconst executionId  = payload.execution_id  || '';\n\nif (!fileId || !userId) {\n  throw new Error('Malformed payload: file_id and user_id are required');\n}\n\n// Retrieve retry state\nconst sd = $getWorkflowStaticData('global');\nif (!sd.retryState) sd.retryState = {};\n\nconst key = `${fileId}::${submissionId}`;\nconst now = Date.now();\n\nif (!sd.retryState[key] || (now - sd.retryState[key].last_attempt) > RETRY_WINDOW_MS) {\n  // First failure or window expired — reset counter\n  sd.retryState[key] = { attempts: 0, first_failure: now, last_attempt: now };\n}\n\nsd.retryState[key].attempts    += 1;\nsd.retryState[key].last_attempt = now;\n\nconst attempt = sd.retryState[key].attempts;\nconst shouldRetry = attempt <= MAX_ATTEMPTS;\n\n// Evict stale keys (older than 2 × window) to bound memory\nObject.keys(sd.retryState).forEach(k => {\n  if ((now - sd.retryState[k].last_attempt) > RETRY_WINDOW_MS * 2) {\n    delete sd.retryState[k];\n  }\n});\n\nreturn [{\n  json: {\n    event_id:       item.json.event_id,\n    correlation_id: item.json.correlation_id,\n    file_id:        fileId,\n    user_id:        userId,\n    role,\n    submission_id:  submissionId,\n    failure_reasons: failureReasons,\n    failure_code:   failureCode,\n    pipeline,\n    graph_name:     graphName,\n    execution_id:   executionId,\n    attempt,\n    max_attempts:   MAX_ATTEMPTS,\n    should_retry:   shouldRetry,\n  }\n}];"
+      },
+      "id": "c3d4e5f6-0003-0003-0003-c3d4e5f60003",
+      "name": "Retry State Manager",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true },
+          "conditions": [
+            {
+              "id": "retry-check",
+              "leftValue": "={{ $json.should_retry }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equals" }
+            }
+          ]
+        }
+      },
+      "id": "c3d4e5f6-0003-0004-0003-c3d4e5f60004",
+      "name": "Should Retry?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [920, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Exponential back-off before retry dispatch\n// attempt 1 → 5s, attempt 2 → 15s, attempt 3 → 45s\nconst item    = $input.first();\nconst attempt = item.json.attempt || 1;\nconst delayMs = Math.min(5000 * Math.pow(3, attempt - 1), 60000);\n\nconsole.log(JSON.stringify({\n  level:   'info',\n  message: 'pipeline_retry_scheduled',\n  file_id: item.json.file_id,\n  attempt,\n  delay_ms: delayMs,\n  correlation_id: item.json.correlation_id,\n}));\n\n// n8n does not have a native sleep; use the Wait node in real workflows.\n// Here we pass delay_ms downstream to document the intended back-off.\nreturn [{ json: { ...item.json, retry_delay_ms: delayMs } }];"
+      },
+      "id": "c3d4e5f6-0003-0005-0003-c3d4e5f60005",
+      "name": "Compute Retry Delay",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1160, 180]
+    },
+    {
+      "parameters": {
+        "amount": "={{ Math.ceil($json.retry_delay_ms / 1000) }}",
+        "unit": "seconds"
+      },
+      "id": "c3d4e5f6-0003-0006-0003-c3d4e5f60006",
+      "name": "Wait (Back-off)",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1,
+      "position": [1400, 180],
+      "webhookId": "eduai-retry-resume"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env['BACKEND_INTERNAL_URL'] }}/internal/pipeline/retry",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type",      "value": "application/json" },
+            { "name": "X-Internal-Secret", "value": "={{ $env['BACKEND_INTERNAL_SECRET'] }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ file_id: $json.file_id, user_id: $json.user_id, role: $json.role, submission_id: $json.submission_id, attempt: $json.attempt, correlation_id: $json.correlation_id }) }}",
+        "options": {
+          "response": { "response": { "fullResponse": true } },
+          "timeout": 30000
+        }
+      },
+      "id": "c3d4e5f6-0003-0007-0003-c3d4e5f60007",
+      "name": "POST Retry to Backend",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1640, 180],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {},
+          "conditions": [
+            {
+              "id": "retry-success",
+              "leftValue": "={{ $json.statusCode }}",
+              "rightValue": 200,
+              "operator": { "type": "number", "operation": "gte" }
+            },
+            {
+              "id": "retry-success-2",
+              "leftValue": "={{ $json.statusCode }}",
+              "rightValue": 300,
+              "operator": { "type": "number", "operation": "lt" }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "c3d4e5f6-0003-0008-0003-c3d4e5f60008",
+      "name": "Retry Succeeded?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1880, 180]
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first();\nconsole.log(JSON.stringify({\n  level: 'info',\n  message: 'pipeline_retry_succeeded',\n  file_id:        item.json.file_id,\n  attempt:        item.json.attempt,\n  correlation_id: item.json.correlation_id,\n}));\nreturn [{ json: { status: 'retry_succeeded', ...item.json } }];"
+      },
+      "id": "c3d4e5f6-0003-0009-0003-c3d4e5f60009",
+      "name": "Log Retry Success",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2120, 100]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================\n// Dead-Letter Handler\n//\n// Triggered when:\n//   a) max retry attempts exceeded (should_retry = false), OR\n//   b) backend returned non-2xx on the final retry attempt.\n//\n// Actions (customize for your stack):\n//   1. Emit a structured dead-letter log entry.\n//   2. POST to an alerting endpoint (PagerDuty, Slack, etc.).\n//   3. Insert a record into Supabase dead_letter_events table\n//      via HTTP Request node so human review can be triggered.\n//\n// The job is NOT retried again — it requires manual intervention.\n// ============================================================\n\nconst item = $input.first();\n\nconst dlqRecord = {\n  id:              `dlq-${item.json.event_id || item.json.correlation_id}`,\n  created_at:      new Date().toISOString(),\n  file_id:         item.json.file_id,\n  user_id:         item.json.user_id,\n  role:            item.json.role,\n  submission_id:   item.json.submission_id,\n  failure_reasons: item.json.failure_reasons,\n  failure_code:    item.json.failure_code,\n  pipeline:        item.json.pipeline,\n  graph_name:      item.json.graph_name,\n  execution_id:    item.json.execution_id,\n  attempts:        item.json.attempt || item.json.max_attempts,\n  max_attempts:    item.json.max_attempts,\n  correlation_id:  item.json.correlation_id,\n  event_id:        item.json.event_id,\n  status:          'dead_lettered',\n  requires_review: true,\n};\n\nconsole.log(JSON.stringify({ level: 'error', message: 'pipeline_dead_lettered', ...dlqRecord }));\n\nreturn [{ json: { dlq_record: dlqRecord } }];"
+      },
+      "id": "c3d4e5f6-0003-0010-0003-c3d4e5f60010",
+      "name": "Dead-Letter Handler",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1160, 440]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env['BACKEND_INTERNAL_URL'] }}/internal/dead-letter",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type",      "value": "application/json" },
+            { "name": "X-Internal-Secret", "value": "={{ $env['BACKEND_INTERNAL_SECRET'] }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.dlq_record) }}",
+        "options": {
+          "response": { "response": { "fullResponse": true } },
+          "timeout": 10000,
+          "retry": {
+            "enabled": true,
+            "maxTries": 3,
+            "waitBetweenTries": 3000
+          }
+        }
+      },
+      "id": "c3d4e5f6-0003-0011-0003-c3d4e5f60011",
+      "name": "POST Dead-Letter to Backend",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1400, 440],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"status\": \"accepted\", \"event_id\": \"{{ $('Verify HMAC Signature').item.json.event_id }}\", \"action\": \"{{ $('Should Retry?').item.json.should_retry ? 'retry_scheduled' : 'dead_lettered' }}\" }",
+        "options": { "responseCode": 202 }
+      },
+      "id": "c3d4e5f6-0003-0012-0003-c3d4e5f60012",
+      "name": "Respond 202 Accepted",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [2120, 340]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [[{ "node": "Verify HMAC Signature", "type": "main", "index": 0 }]]
+    },
+    "Verify HMAC Signature": {
+      "main": [[{ "node": "Retry State Manager", "type": "main", "index": 0 }]]
+    },
+    "Retry State Manager": {
+      "main": [[{ "node": "Should Retry?", "type": "main", "index": 0 }]]
+    },
+    "Should Retry?": {
+      "main": [
+        [{ "node": "Dead-Letter Handler",  "type": "main", "index": 0 }],
+        [{ "node": "Compute Retry Delay",  "type": "main", "index": 0 }]
+      ]
+    },
+    "Compute Retry Delay": {
+      "main": [[{ "node": "Wait (Back-off)",       "type": "main", "index": 0 }]]
+    },
+    "Wait (Back-off)": {
+      "main": [[{ "node": "POST Retry to Backend", "type": "main", "index": 0 }]]
+    },
+    "POST Retry to Backend": {
+      "main": [[{ "node": "Retry Succeeded?",      "type": "main", "index": 0 }]]
+    },
+    "Retry Succeeded?": {
+      "main": [
+        [{ "node": "Dead-Letter Handler",  "type": "main", "index": 0 }],
+        [{ "node": "Log Retry Success",    "type": "main", "index": 0 }]
+      ]
+    },
+    "Log Retry Success": {
+      "main": [[{ "node": "Respond 202 Accepted", "type": "main", "index": 0 }]]
+    },
+    "Dead-Letter Handler": {
+      "main": [[{ "node": "POST Dead-Letter to Backend", "type": "main", "index": 0 }]]
+    },
+    "POST Dead-Letter to Backend": {
+      "main": [[{ "node": "Respond 202 Accepted", "type": "main", "index": 0 }]]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "errorWorkflow": ""
+  },
+  "active": false,
+  "versionId": "eduai-pipeline-failure-v1-0",
+  "id": "wf-failed-pipeline-retry",
+  "tags": ["phase13", "events", "reliability", "dead-letter"]
+}

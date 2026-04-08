@@ -1,0 +1,299 @@
+{
+  "name": "EduAI — Failed Pipeline Retry & Dead-Letter v2",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "pipeline-failure",
+        "options": { "rawBody": true },
+        "responseMode": "responseNode"
+      },
+      "id": "wf003v2-0001",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [200, 300],
+      "webhookId": "eduai-pipeline-failure-v2"
+    },
+    {
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\n\nconst HMAC_SECRET   = $env['N8N_WEBHOOK_HMAC_SECRET'];\nconst MAX_SKEW_SECS = 300;\n\nconst item    = $input.first();\nconst headers = item.json.headers || {};\n\nconst sigHeader = headers['x-eduai-signature-256']   || '';\nconst tsHeader  = headers['x-eduai-timestamp']       || '';\nconst idempKey  = headers['x-eduai-idempotency-key'] || '';\n\nconst nowSecs = Math.floor(Date.now() / 1000);\nconst tsSecs  = parseInt(tsHeader, 10);\nif (isNaN(tsSecs) || Math.abs(nowSecs - tsSecs) > MAX_SKEW_SECS) {\n  throw new Error(`Timestamp rejected: skew=${nowSecs - tsSecs}s`);\n}\n\nconst rawBody  = item.json.rawBody || JSON.stringify(item.json.body);\nconst expected = 'sha256=' + crypto.createHmac('sha256', HMAC_SECRET).update(rawBody, 'utf8').digest('hex');\nconst sigBuf = Buffer.from(sigHeader);\nconst expBuf = Buffer.from(expected);\nif (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {\n  throw new Error('Signature verification failed');\n}\n\nconst body = typeof rawBody === 'string' ? JSON.parse(rawBody) : rawBody;\nreturn [{ json: { ...body, _idempotency_key: idempKey, _verified: true } }];"
+      },
+      "id": "wf003v2-0002",
+      "name": "Verify HMAC Signature",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── Deliverable 2: Role Isolation ──────────────────────────────────────────\n// Pipeline failures are emitted for student and professor analysis runs.\n// 'system' is also permitted for internal health-check pipelines.\nconst ALLOWED_ROLES = ['student', 'professor', 'system'];\n\nconst item = $input.first();\nconst role = (item.json.payload || {}).role || '';\n\nif (!ALLOWED_ROLES.includes(role)) {\n  console.error(JSON.stringify({\n    level: 'error', message: 'role_rejected',\n    role, allowed: ALLOWED_ROLES,\n    event_id: item.json.event_id,\n  }));\n  throw new Error(`Role '${role}' is not permitted in the pipeline-failure workflow. Allowed: ${ALLOWED_ROLES.join(', ')}`);\n}\n\nreturn [{ json: { ...item.json, _role_validated: true } }];"
+      },
+      "id": "wf003v2-0003",
+      "name": "Validate Role",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract and validate required fields before Redis call.\nconst item    = $input.first();\nconst payload = item.json.payload || {};\n\nconst fileId       = payload.file_id       || '';\nconst userId       = payload.user_id       || '';\nconst role         = payload.role          || '';\nconst submissionId = payload.submission_id || '';\nconst failureReasons = payload.failure_reasons || [];\nconst failureCode  = payload.failure_code  || 'unknown';\nconst pipeline     = payload.pipeline      || 'phase12_langgraph';\nconst graphName    = payload.graph_name    || '';\nconst executionId  = payload.execution_id  || '';\n\nif (!fileId || !userId) {\n  throw new Error('Malformed payload: file_id and user_id are required');\n}\n\nreturn [{\n  json: {\n    event_id:        item.json.event_id,\n    correlation_id:  item.json.correlation_id,\n    file_id:         fileId,\n    user_id:         userId,\n    role,\n    submission_id:   submissionId,\n    failure_reasons: failureReasons,\n    failure_code:    failureCode,\n    pipeline,\n    graph_name:      graphName,\n    execution_id:    executionId,\n  }\n}];"
+      },
+      "id": "wf003v2-0004",
+      "name": "Parse Failure Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [920, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env['BACKEND_INTERNAL_URL'] }}/internal/retry-state/increment",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type",      "value": "application/json" },
+            { "name": "X-Internal-Secret", "value": "={{ $env['BACKEND_INTERNAL_SECRET'] }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ file_id: $json.file_id, submission_id: $json.submission_id, window_seconds: 1800, max_attempts: 3 }) }}",
+        "options": {
+          "response": { "response": { "fullResponse": false } },
+          "timeout": 5000
+        }
+      },
+      "id": "wf003v2-0005",
+      "name": "Get Retry State (Redis)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1160, 300],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Merge retry state with the parsed payload.\n// Fail-open: if Redis backend is unreachable, allow one retry attempt.\nconst parsed    = $('Parse Failure Payload').item.json;\nconst retryResp = $input.first().json;\n\nconst attempts    = retryResp.error ? 1         : (retryResp.attempts    || 1);\nconst maxAttempts = retryResp.error ? 3         : (retryResp.max_attempts || 3);\nconst shouldRetry = retryResp.error ? true      : (retryResp.should_retry !== false);\n\nif (retryResp.error) {\n  console.warn(JSON.stringify({\n    level: 'warn', message: 'retry_state_backend_unreachable_fail_open',\n    file_id: parsed.file_id, error: String(retryResp.error).slice(0, 200),\n  }));\n}\n\nreturn [{\n  json: {\n    ...parsed,\n    attempt:      attempts,\n    max_attempts: maxAttempts,\n    should_retry: shouldRetry,\n  }\n}];"
+      },
+      "id": "wf003v2-0006",
+      "name": "Resolve Retry State",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1400, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": false },
+          "conditions": [
+            {
+              "id": "retry-check",
+              "leftValue": "={{ $json.should_retry }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equals" }
+            }
+          ]
+        }
+      },
+      "id": "wf003v2-0007",
+      "name": "Should Retry?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1640, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Exponential back-off: attempt 1 → 5s, 2 → 15s, 3 → 45s (cap 60s)\nconst item    = $input.first();\nconst attempt = item.json.attempt || 1;\nconst delayMs = Math.min(5000 * Math.pow(3, attempt - 1), 60000);\n\nconsole.log(JSON.stringify({\n  level: 'info', message: 'pipeline_retry_scheduled',\n  file_id:        item.json.file_id,\n  attempt,\n  delay_ms:       delayMs,\n  correlation_id: item.json.correlation_id,\n}));\n\nreturn [{ json: { ...item.json, retry_delay_ms: delayMs } }];"
+      },
+      "id": "wf003v2-0008",
+      "name": "Compute Retry Delay",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1880, 180]
+    },
+    {
+      "parameters": {
+        "amount": "={{ Math.ceil($json.retry_delay_ms / 1000) }}",
+        "unit": "seconds"
+      },
+      "id": "wf003v2-0009",
+      "name": "Wait (Back-off)",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1,
+      "position": [2120, 180],
+      "webhookId": "eduai-retry-resume-v2"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env['BACKEND_INTERNAL_URL'] }}/internal/pipeline/retry",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type",      "value": "application/json" },
+            { "name": "X-Internal-Secret", "value": "={{ $env['BACKEND_INTERNAL_SECRET'] }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ file_id: $json.file_id, user_id: $json.user_id, role: $json.role, submission_id: $json.submission_id, attempt: $json.attempt, correlation_id: $json.correlation_id }) }}",
+        "options": {
+          "response": { "response": { "fullResponse": true } },
+          "timeout": 30000
+        }
+      },
+      "id": "wf003v2-0010",
+      "name": "POST Retry to Backend",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [2360, 180],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {},
+          "conditions": [
+            {
+              "id": "retry-success-1",
+              "leftValue": "={{ $json.statusCode }}",
+              "rightValue": 200,
+              "operator": { "type": "number", "operation": "gte" }
+            },
+            {
+              "id": "retry-success-2",
+              "leftValue": "={{ $json.statusCode }}",
+              "rightValue": 300,
+              "operator": { "type": "number", "operation": "lt" }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "wf003v2-0011",
+      "name": "Retry Succeeded?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [2600, 180]
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first();\nconsole.log(JSON.stringify({\n  level: 'info', message: 'pipeline_retry_succeeded',\n  file_id:        item.json.file_id,\n  attempt:        item.json.attempt,\n  correlation_id: item.json.correlation_id,\n}));\nreturn [{ json: { status: 'retry_succeeded', ...item.json } }];"
+      },
+      "id": "wf003v2-0012",
+      "name": "Log Retry Success",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2840, 100]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── Dead-Letter Handler ────────────────────────────────────────────────────\n// Triggered when: (a) max retry attempts exhausted, OR\n//                 (b) backend returned non-2xx on final retry.\n// Emits structured dead-letter log. Backend endpoint persists it.\nconst item = $input.first();\n\nconst dlqRecord = {\n  id:              `dlq-${item.json.event_id || item.json.correlation_id}`,\n  created_at:      new Date().toISOString(),\n  file_id:         item.json.file_id         || '',\n  user_id:         item.json.user_id         || '',\n  role:            item.json.role            || '',\n  submission_id:   item.json.submission_id   || '',\n  failure_reasons: item.json.failure_reasons || [],\n  failure_code:    item.json.failure_code    || 'unknown',\n  pipeline:        item.json.pipeline        || '',\n  graph_name:      item.json.graph_name      || '',\n  execution_id:    item.json.execution_id    || '',\n  attempts:        item.json.attempt         || item.json.max_attempts,\n  max_attempts:    item.json.max_attempts    || 3,\n  correlation_id:  item.json.correlation_id  || '',\n  event_id:        item.json.event_id        || '',\n  status:          'dead_lettered',\n  requires_review: true,\n};\n\nconsole.error(JSON.stringify({ level: 'error', message: 'pipeline_dead_lettered', ...dlqRecord }));\n\nreturn [{ json: { dlq_record: dlqRecord } }];"
+      },
+      "id": "wf003v2-0013",
+      "name": "Dead-Letter Handler",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1880, 440]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env['BACKEND_INTERNAL_URL'] }}/internal/dead-letter",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type",      "value": "application/json" },
+            { "name": "X-Internal-Secret", "value": "={{ $env['BACKEND_INTERNAL_SECRET'] }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.dlq_record) }}",
+        "options": {
+          "response": { "response": { "fullResponse": true } },
+          "timeout": 10000,
+          "retry": { "enabled": true, "maxTries": 3, "waitBetweenTries": 3000 }
+        }
+      },
+      "id": "wf003v2-0014",
+      "name": "POST Dead-Letter to Backend",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [2120, 440],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ status: 'accepted', event_id: $('Verify HMAC Signature').item.json.event_id, action: $('Resolve Retry State').item.json.should_retry ? 'retry_scheduled' : 'dead_lettered' }) }}",
+        "options": { "responseCode": 202 }
+      },
+      "id": "wf003v2-0015",
+      "name": "Respond 202 Accepted",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [2840, 360]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [[{ "node": "Verify HMAC Signature",  "type": "main", "index": 0 }]]
+    },
+    "Verify HMAC Signature": {
+      "main": [[{ "node": "Validate Role",           "type": "main", "index": 0 }]]
+    },
+    "Validate Role": {
+      "main": [[{ "node": "Parse Failure Payload",   "type": "main", "index": 0 }]]
+    },
+    "Parse Failure Payload": {
+      "main": [[{ "node": "Get Retry State (Redis)", "type": "main", "index": 0 }]]
+    },
+    "Get Retry State (Redis)": {
+      "main": [[{ "node": "Resolve Retry State",     "type": "main", "index": 0 }]]
+    },
+    "Resolve Retry State": {
+      "main": [[{ "node": "Should Retry?",           "type": "main", "index": 0 }]]
+    },
+    "Should Retry?": {
+      "main": [
+        [{ "node": "Dead-Letter Handler",  "type": "main", "index": 0 }],
+        [{ "node": "Compute Retry Delay",  "type": "main", "index": 0 }]
+      ]
+    },
+    "Compute Retry Delay": {
+      "main": [[{ "node": "Wait (Back-off)",        "type": "main", "index": 0 }]]
+    },
+    "Wait (Back-off)": {
+      "main": [[{ "node": "POST Retry to Backend",  "type": "main", "index": 0 }]]
+    },
+    "POST Retry to Backend": {
+      "main": [[{ "node": "Retry Succeeded?",       "type": "main", "index": 0 }]]
+    },
+    "Retry Succeeded?": {
+      "main": [
+        [{ "node": "Dead-Letter Handler",  "type": "main", "index": 0 }],
+        [{ "node": "Log Retry Success",    "type": "main", "index": 0 }]
+      ]
+    },
+    "Log Retry Success": {
+      "main": [[{ "node": "Respond 202 Accepted",   "type": "main", "index": 0 }]]
+    },
+    "Dead-Letter Handler": {
+      "main": [[{ "node": "POST Dead-Letter to Backend", "type": "main", "index": 0 }]]
+    },
+    "POST Dead-Letter to Backend": {
+      "main": [[{ "node": "Respond 202 Accepted",   "type": "main", "index": 0 }]]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "errorWorkflow": ""
+  },
+  "active": false,
+  "versionId": "eduai-pipeline-failure-v2-0",
+  "id": "wf-failed-pipeline-retry-v2",
+  "tags": ["phase13", "events", "v2", "role-isolation", "redis-retry-state", "dead-letter"]
+}

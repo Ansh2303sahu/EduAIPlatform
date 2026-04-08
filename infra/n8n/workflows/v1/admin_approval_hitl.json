@@ -1,0 +1,254 @@
+{
+  "name": "EduAI — Admin Approval HITL v1",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "admin-approval-hitl",
+        "options": { "rawBody": true },
+        "responseMode": "responseNode"
+      },
+      "id": "wf004-0001",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [200, 300],
+      "webhookId": "eduai-admin-approval-hitl-v1"
+    },
+    {
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\n\nconst HMAC_SECRET   = $env['N8N_WEBHOOK_HMAC_SECRET'];\nconst MAX_SKEW_SECS = 300;\n\nconst item    = $input.first();\nconst headers = item.json.headers || {};\n\nconst sigHeader = headers['x-eduai-signature-256']   || '';\nconst tsHeader  = headers['x-eduai-timestamp']       || '';\nconst idempKey  = headers['x-eduai-idempotency-key'] || '';\n\nconst nowSecs = Math.floor(Date.now() / 1000);\nconst tsSecs  = parseInt(tsHeader, 10);\nif (isNaN(tsSecs) || Math.abs(nowSecs - tsSecs) > MAX_SKEW_SECS) {\n  throw new Error(`Timestamp rejected: skew=${nowSecs - tsSecs}s`);\n}\n\nconst rawBody  = item.json.rawBody || JSON.stringify(item.json.body);\nconst expected = 'sha256=' + crypto.createHmac('sha256', HMAC_SECRET).update(rawBody, 'utf8').digest('hex');\nconst sigBuf = Buffer.from(sigHeader);\nconst expBuf = Buffer.from(expected);\nif (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {\n  throw new Error('Signature verification failed');\n}\n\nconst body = typeof rawBody === 'string' ? JSON.parse(rawBody) : rawBody;\nreturn [{ json: { ...body, _idempotency_key: idempKey, _verified: true } }];"
+      },
+      "id": "wf004-0002",
+      "name": "Verify HMAC Signature",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── Deliverable 2: Role Isolation ──────────────────────────────────────────\n// The HITL workflow handles escalations for student and professor AI outputs.\n// The SUBJECT (person whose report is under review) must be student/professor.\n// This workflow is triggered internally by FastAPI, not by end-users directly.\nconst ALLOWED_ROLES = ['student', 'professor'];\n\nconst item = $input.first();\nconst role = (item.json.payload || {}).role || '';\n\nif (!ALLOWED_ROLES.includes(role)) {\n  console.error(JSON.stringify({\n    level: 'error', message: 'hitl_role_rejected',\n    role, allowed: ALLOWED_ROLES,\n    event_id: item.json.event_id,\n  }));\n  throw new Error(`HITL: subject role '${role}' is not permitted. Allowed: ${ALLOWED_ROLES.join(', ')}`);\n}\n\nreturn [{ json: { ...item.json, _role_validated: true } }];"
+      },
+      "id": "wf004-0003",
+      "name": "Validate Role",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build the HITL notification payload.\n// $execution.resumeUrl is the URL the admin must call to resume this execution.\n// It is provided by n8n automatically for executions with Wait nodes.\nconst item    = $input.first();\nconst payload = item.json.payload || {};\n\nconst confidence = typeof payload.confidence_score === 'number' ? payload.confidence_score : null;\nlet severity = 'high';\nif (confidence !== null) {\n  severity = confidence < 0.25 ? 'critical' : confidence < 0.35 ? 'high' : 'moderate';\n}\n\nconst escalationId = `esc-${item.json.event_id}`;\n\n// $execution.resumeUrl is injected by n8n at execution start.\n// The admin POSTs to this URL with { decision: 'approved'|'rejected', notes: '...' }\nconst resumeUrl = $execution.resumeUrl;\n\nconst notification = {\n  escalation_id:   escalationId,\n  resume_url:      resumeUrl,\n  severity,\n  confidence,\n  file_id:         payload.file_id  || '',\n  user_id:         payload.user_id  || '',\n  role:            payload.role     || '',\n  model_id:        payload.model_id || '',\n  event_id:        item.json.event_id,\n  correlation_id:  item.json.correlation_id,\n  created_at:      new Date().toISOString(),\n  message: `HITL review required: AI report confidence=${confidence} (${severity}) for ${payload.role} user ${payload.user_id}. Approve or reject at: ${resumeUrl}`,\n};\n\nconsole.log(JSON.stringify({\n  level: 'info', message: 'hitl_notification_prepared',\n  escalation_id:  escalationId,\n  severity,\n  resume_url:     resumeUrl ? resumeUrl.slice(0, 80) + '...' : 'n/a',\n}));\n\nreturn [{ json: { notification, escalation_id: escalationId, severity, event_id: item.json.event_id } }];"
+      },
+      "id": "wf004-0004",
+      "name": "Build HITL Notification",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [920, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env['BACKEND_INTERNAL_URL'] }}/internal/escalations/notify",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type",      "value": "application/json" },
+            { "name": "X-Internal-Secret", "value": "={{ $env['BACKEND_INTERNAL_SECRET'] }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.notification) }}",
+        "options": {
+          "response": { "response": { "fullResponse": true } },
+          "timeout": 10000,
+          "retry": { "enabled": true, "maxTries": 2, "waitBetweenTries": 2000 }
+        }
+      },
+      "id": "wf004-0005",
+      "name": "Send Admin Notification",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1160, 300],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ status: 'accepted', event_id: $('Verify HMAC Signature').item.json.event_id, escalation_id: $('Build HITL Notification').item.json.escalation_id, awaiting_admin_decision: true }) }}",
+        "options": { "responseCode": 202 }
+      },
+      "id": "wf004-0006",
+      "name": "Respond 202 Accepted",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1400, 300]
+    },
+    {
+      "parameters": {
+        "resume": "webhook",
+        "options": {
+          "responseCode": 200,
+          "responseData": "firstEntryJson"
+        }
+      },
+      "id": "wf004-0007",
+      "name": "Wait for Admin Decision",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1,
+      "position": [1640, 300],
+      "webhookId": "eduai-hitl-resume-v1"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse the admin's decision from the Wait node resume payload.\n// The admin POST body should contain: { decision: 'approved'|'rejected', notes: '...' }\n// $input.first() is what the admin POSTed to the resumeUrl.\nconst resumeData = $input.first().json;\n\nconst decision   = (resumeData.decision || '').toLowerCase().trim();\nconst notes      = resumeData.notes      || '';\nconst decidedBy  = resumeData.decided_by || resumeData.admin_id || 'unknown';\nconst resumedAt  = new Date().toISOString();\n\nif (!['approved', 'rejected'].includes(decision)) {\n  throw new Error(`Invalid decision '${decision}'. Must be 'approved' or 'rejected'.`);\n}\n\nconst escalationId = $('Build HITL Notification').item.json.escalation_id;\n\nconsole.log(JSON.stringify({\n  level: 'info', message: 'hitl_decision_received',\n  escalation_id: escalationId,\n  decision,\n  decided_by:    decidedBy,\n  resumed_at:    resumedAt,\n}));\n\nreturn [{\n  json: {\n    escalation_id: escalationId,\n    decision,\n    notes,\n    decided_by:  decidedBy,\n    resumed_at:  resumedAt,\n    event_id:    $('Verify HMAC Signature').item.json.event_id,\n    correlation_id: $('Verify HMAC Signature').item.json.correlation_id,\n  }\n}];"
+      },
+      "id": "wf004-0008",
+      "name": "Parse Admin Decision",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1880, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": false },
+          "conditions": [
+            {
+              "id": "approved-check",
+              "leftValue": "={{ $json.decision }}",
+              "rightValue": "approved",
+              "operator": { "type": "string", "operation": "equals" }
+            }
+          ]
+        }
+      },
+      "id": "wf004-0009",
+      "name": "Admin Approved?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [2120, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first();\nconsole.log(JSON.stringify({\n  level: 'info', message: 'hitl_approved',\n  escalation_id: item.json.escalation_id,\n  decided_by:    item.json.decided_by,\n  notes:         item.json.notes,\n}));\n// In production: mark the report as approved in Supabase,\n// unblock the user notification pipeline, etc.\nreturn [{ json: { ...item.json, outcome: 'approved', outcome_at: new Date().toISOString() } }];"
+      },
+      "id": "wf004-0010",
+      "name": "Handle Approved",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2360, 180]
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first();\nconsole.warn(JSON.stringify({\n  level: 'warn', message: 'hitl_rejected',\n  escalation_id: item.json.escalation_id,\n  decided_by:    item.json.decided_by,\n  notes:         item.json.notes,\n}));\n// In production: flag the report as needing reanalysis in Supabase,\n// trigger a re-run of the LangGraph pipeline with stricter settings, etc.\nreturn [{ json: { ...item.json, outcome: 'rejected', outcome_at: new Date().toISOString() } }];"
+      },
+      "id": "wf004-0011",
+      "name": "Handle Rejected",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2360, 420]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env['BACKEND_INTERNAL_URL'] }}/internal/escalations/resolve",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type",      "value": "application/json" },
+            { "name": "X-Internal-Secret", "value": "={{ $env['BACKEND_INTERNAL_SECRET'] }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ escalation_id: $json.escalation_id, decision: $json.decision, decided_by: $json.decided_by, notes: $json.notes, resumed_at: $json.resumed_at }) }}",
+        "options": {
+          "response": { "response": { "fullResponse": true } },
+          "timeout": 10000,
+          "retry": { "enabled": true, "maxTries": 3, "waitBetweenTries": 3000 }
+        }
+      },
+      "id": "wf004-0012",
+      "name": "POST Outcome to Backend",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [2600, 300],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env['BACKEND_INTERNAL_URL'] }}/internal/events/metric",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type",      "value": "application/json" },
+            { "name": "X-Internal-Secret", "value": "={{ $env['BACKEND_INTERNAL_SECRET'] }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ metric: 'hitl.decisions.' + $('Parse Admin Decision').item.json.decision, value: 1 }) }}",
+        "options": { "timeout": 3000 }
+      },
+      "id": "wf004-0013",
+      "name": "Metric: decision",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [2840, 300],
+      "continueOnFail": true
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [[{ "node": "Verify HMAC Signature",   "type": "main", "index": 0 }]]
+    },
+    "Verify HMAC Signature": {
+      "main": [[{ "node": "Validate Role",            "type": "main", "index": 0 }]]
+    },
+    "Validate Role": {
+      "main": [[{ "node": "Build HITL Notification",  "type": "main", "index": 0 }]]
+    },
+    "Build HITL Notification": {
+      "main": [[{ "node": "Send Admin Notification",  "type": "main", "index": 0 }]]
+    },
+    "Send Admin Notification": {
+      "main": [[{ "node": "Respond 202 Accepted",     "type": "main", "index": 0 }]]
+    },
+    "Respond 202 Accepted": {
+      "main": [[{ "node": "Wait for Admin Decision",  "type": "main", "index": 0 }]]
+    },
+    "Wait for Admin Decision": {
+      "main": [[{ "node": "Parse Admin Decision",     "type": "main", "index": 0 }]]
+    },
+    "Parse Admin Decision": {
+      "main": [[{ "node": "Admin Approved?",          "type": "main", "index": 0 }]]
+    },
+    "Admin Approved?": {
+      "main": [
+        [{ "node": "Handle Rejected",  "type": "main", "index": 0 }],
+        [{ "node": "Handle Approved",  "type": "main", "index": 0 }]
+      ]
+    },
+    "Handle Approved": {
+      "main": [[{ "node": "POST Outcome to Backend",  "type": "main", "index": 0 }]]
+    },
+    "Handle Rejected": {
+      "main": [[{ "node": "POST Outcome to Backend",  "type": "main", "index": 0 }]]
+    },
+    "POST Outcome to Backend": {
+      "main": [[{ "node": "Metric: decision",         "type": "main", "index": 0 }]]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "errorWorkflow": ""
+  },
+  "active": false,
+  "versionId": "eduai-admin-approval-hitl-v1-0",
+  "id": "wf-admin-approval-hitl-v1",
+  "tags": ["phase13", "events", "hitl", "admin-approval", "wait-node"]
+}

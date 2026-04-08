@@ -1,0 +1,319 @@
+{
+  "name": "EduAI — Professor Multi-Model Assessment v2",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ai-assessment-professor",
+        "options": { "rawBody": true },
+        "responseMode": "responseNode"
+      },
+      "id": "wf014p-0001",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [200, 300],
+      "webhookId": "eduai-assessment-professor-v2"
+    },
+    {
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\n\nconst HMAC_SECRET   = $env['N8N_WEBHOOK_HMAC_SECRET'];\nconst MAX_SKEW_SECS = 300;\n\nconst item = $input.first();\nconst root = item.json || {};\nconst headers = (root.headers && typeof root.headers === 'object') ? root.headers : {};\nconst availableHeaderKeys = Object.keys(headers);\n\nfunction readHeader(name) {\n  const variants = [name, name.toLowerCase(), name.toUpperCase()];\n  for (const key of variants) {\n    const value = headers[key] ?? root[key];\n    if (Array.isArray(value) && value.length > 0) return String(value[0]);\n    if (typeof value === 'string' || typeof value === 'number') return String(value);\n  }\n  return '';\n}\n\nconst sigHeader = readHeader('X-EduAI-Signature-256');\nconst tsHeader  = readHeader('X-EduAI-Timestamp');\nconst idempKey  = readHeader('X-EduAI-Idempotency-Key');\n\nif (!sigHeader) {\n  throw new Error(`Missing X-EduAI-Signature-256; available header keys: ${availableHeaderKeys.join(', ') || '(none)'}`);\n}\nif (!tsHeader) {\n  throw new Error(`Missing X-EduAI-Timestamp; available header keys: ${availableHeaderKeys.join(', ') || '(none)'}`);\n}\n\nconst nowSecs = Math.floor(Date.now() / 1000);\nconst tsSecs  = parseInt(tsHeader, 10);\nif (isNaN(tsSecs) || Math.abs(nowSecs - tsSecs) > MAX_SKEW_SECS) {\n  throw new Error(`Timestamp rejected: skew=${nowSecs - tsSecs}s`);\n}\n\nconst rawBody  = typeof root.rawBody === 'string' ? root.rawBody : JSON.stringify(root.body || root.payload || root);\nconst expected = 'sha256=' + crypto.createHmac('sha256', HMAC_SECRET).update(rawBody, 'utf8').digest('hex');\nconst sigBuf = Buffer.from(sigHeader);\nconst expBuf = Buffer.from(expected);\nif (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {\n  throw new Error('Signature verification failed');\n}\n\nconst body = typeof rawBody === 'string' ? JSON.parse(rawBody) : rawBody;\nreturn [{ json: { ...body, _idempotency_key: idempKey, _verified: true } }];"
+      },
+      "id": "wf014p-0002",
+      "name": "Verify HMAC",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const ALLOWED_ROLES = ['professor'];\nconst item = $input.first();\nconst role = (item.json.payload || {}).role || '';\nif (!ALLOWED_ROLES.includes(role)) {\n  throw new Error(`Role '${role}' rejected in professor assessment workflow.`);\n}\nreturn [{ json: { ...item.json, _role_validated: true } }];"
+      },
+      "id": "wf014p-0003",
+      "name": "Validate Role (professor)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env['BACKEND_INTERNAL_URL'] }}/internal/idempotency/check",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type",      "value": "application/json" },
+            { "name": "X-Internal-Secret", "value": "={{ $env['BACKEND_INTERNAL_SECRET'] }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ event_id: $json.event_id, ttl_seconds: 86400 }) }}",
+        "options": { "response": { "response": { "fullResponse": false } }, "timeout": 5000 }
+      },
+      "id": "wf014p-0004",
+      "name": "Check Idempotency",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [920, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [{ "value1": "={{ $json.fresh }}", "value2": true }]
+        }
+      },
+      "id": "wf014p-0005",
+      "name": "Is Duplicate?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1160, 300]
+    },
+    {
+      "parameters": {
+        "options": { "responseCode": 200 },
+        "respondWith": "json",
+        "responseBody": "={\"status\": \"duplicate\", \"event_id\": $json.event_id}"
+      },
+      "id": "wf014p-0006",
+      "name": "Respond 200 Duplicate",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1400, 180]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env['BACKEND_INTERNAL_URL'] }}/internal/assessment/rubric-context",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type",      "value": "application/json" },
+            { "name": "X-Internal-Secret", "value": "={{ $env['BACKEND_INTERNAL_SECRET'] }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ file_id: $json.payload.file_id, submission_id: $json.payload.submission_id || '', user_id: $json.payload.user_id, role: 'professor', include_draft: true }) }}",
+        "options": { "response": { "response": { "fullResponse": false } }, "timeout": 10000 }
+      },
+      "id": "wf014p-0007",
+      "name": "Fetch Rubric Context",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1400, 420]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type",  "value": "application/json" },
+            { "name": "Authorization", "value": "=Bearer {{ $env['OPENAI_API_KEY'] }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'gpt-4o', response_format: { type: 'json_object' }, messages: [ { role: 'system', content: 'You are an expert academic quality assurance specialist reviewing professor-created assessment materials. Evaluate pedagogical appropriateness, rubric completeness, marking consistency, and feedback quality. Return JSON with the same structure as a student assessment but focused on assessment design quality: rubric_scores, overall_grade, overall_score, summary, strengths, issues, improvement_plan, confidence, needs_human_review, safety_flags.' }, { role: 'user', content: 'Rubric context: ' + JSON.stringify($node['Fetch Rubric Context'].json) + '\\n\\nAssessment materials: ' + JSON.stringify($node['Verify HMAC'].json.payload) } ] }) }}",
+        "options": { "timeout": 60000 }
+      },
+      "id": "wf014p-0008",
+      "name": "Call OpenAI (Primary)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1640, 420]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type",      "value": "application/json" },
+            { "name": "x-api-key",         "value": "={{ $env['ANTHROPIC_API_KEY'] }}" },
+            { "name": "anthropic-version",  "value": "2023-06-01" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 2048, system: 'You are an expert academic peer reviewer. Review this OpenAI assessment of professor materials for logical consistency, accuracy, and appropriate academic standards. Return JSON: consistent, reviewer_confidence, concerns, corrections, flagged_for_hitl, hitl_reason, overall_verdict (approved|needs_correction|escalate).', messages: [{ role: 'user', content: 'OpenAI assessment to review: ' + JSON.stringify($node['Call OpenAI (Primary)'].json.choices[0].message.content) + '\\n\\nOriginal context: ' + JSON.stringify($node['Fetch Rubric Context'].json) }] }) }}",
+        "options": { "timeout": 45000 }
+      },
+      "id": "wf014p-0009",
+      "name": "Call Claude (Reviewer)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1880, 420]
+    },
+    {
+      "parameters": {
+        "jsCode": "const openaiRaw = $node['Call OpenAI (Primary)'].json;\nconst claudeRaw = $node['Call Claude (Reviewer)'].json;\n\nlet openaiResult;\ntry {\n  const content = openaiRaw.choices[0].message.content;\n  openaiResult = typeof content === 'string' ? JSON.parse(content) : content;\n} catch (e) {\n  throw new Error('Failed to parse OpenAI response: ' + e.message);\n}\n\nlet claudeResult;\ntry {\n  const content = claudeRaw.content[0].text;\n  claudeResult = typeof content === 'string' ? JSON.parse(content) : content;\n} catch (e) {\n  throw new Error('Failed to parse Claude response: ' + e.message);\n}\n\nconst openaiConfidence = openaiResult.confidence || 0;\nconst claudeVerdict = claudeResult.overall_verdict || 'approved';\nconst escalationReasons = [];\nif (openaiConfidence < 0.40) escalationReasons.push('openai_confidence_low: ' + openaiConfidence);\nif (claudeVerdict === 'escalate') escalationReasons.push('claude_verdict_escalate');\nif (openaiResult.needs_human_review) escalationReasons.push('openai_needs_human_review');\n\nconst shouldEscalate = escalationReasons.length > 0;\n\nconst openaiUsage = openaiRaw.usage || {};\nopenaiResult.usage = { model: 'gpt-4o', prompt_tokens: openaiUsage.prompt_tokens || 0, completion_tokens: openaiUsage.completion_tokens || 0, total_tokens: openaiUsage.total_tokens || 0, latency_ms: 0, cost_usd: ((openaiUsage.prompt_tokens || 0) * 0.000005 + (openaiUsage.completion_tokens || 0) * 0.000015) };\n\nconst claudeUsage = claudeRaw.usage || {};\nclaudeResult.usage = { model: 'claude-sonnet-4-6', prompt_tokens: claudeUsage.input_tokens || 0, completion_tokens: claudeUsage.output_tokens || 0, total_tokens: (claudeUsage.input_tokens || 0) + (claudeUsage.output_tokens || 0), latency_ms: 0, cost_usd: ((claudeUsage.input_tokens || 0) * 0.000003 + (claudeUsage.output_tokens || 0) * 0.000015) };\n\nconst gateDecision = { pass_gate: !shouldEscalate, escalate: shouldEscalate, hitl_required: shouldEscalate, escalation_reasons: escalationReasons, final_confidence: (openaiConfidence + (claudeResult.reviewer_confidence || 0)) / 2, confidence_sources: { openai: openaiConfidence, claude: claudeResult.reviewer_confidence || 0 }, decided_at: new Date().toISOString() };\n\nconst eventPayload = $node['Verify HMAC'].json.payload || {};\nconst idempKey = $node['Verify HMAC'].json._idempotency_key || $node['Verify HMAC'].json.event_id;\n\nreturn [{ json: { event_id: idempKey, file_id: eventPayload.file_id, submission_id: eventPayload.submission_id || '', user_id: eventPayload.user_id, openai_result: openaiResult, claude_review: claudeResult, gate_decision: gateDecision, _should_escalate: shouldEscalate, _escalation_reasons: escalationReasons, _openai_confidence: openaiConfidence } }];"
+      },
+      "id": "wf014p-0010",
+      "name": "Compute Gate Decision",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2120, 420]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [{ "value1": "={{ $json._should_escalate }}", "value2": true }]
+        }
+      },
+      "id": "wf014p-0011",
+      "name": "Should Escalate?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [2360, 420]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env['BACKEND_INTERNAL_URL'] }}/internal/assessment/escalate",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type",      "value": "application/json" },
+            { "name": "X-Internal-Secret", "value": "={{ $env['BACKEND_INTERNAL_SECRET'] }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ event_id: $json.event_id + '-esc', n8n_execution_id: $execution.id, n8n_resume_url: $execution.resumeUrl, file_id: $json.file_id, submission_id: $json.submission_id, user_id: $json.user_id, role: 'professor', reasons: $json._escalation_reasons, openai_confidence: $json._openai_confidence, severity: $json._openai_confidence < 0.30 ? 'high' : 'medium' }) }}"
+      },
+      "id": "wf014p-0012",
+      "name": "Create Escalation",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [2600, 300]
+    },
+    {
+      "parameters": {
+        "options": { "responseCode": 202 },
+        "respondWith": "json",
+        "responseBody": "={\"status\": \"escalated\", \"escalation_id\": $node['Create Escalation'].json.escalation_id}"
+      },
+      "id": "wf014p-0013",
+      "name": "Respond 202 Escalated",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [2840, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env['BACKEND_INTERNAL_URL'] }}/internal/assessment/submit-result",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type",      "value": "application/json" },
+            { "name": "X-Internal-Secret", "value": "={{ $env['BACKEND_INTERNAL_SECRET'] }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ event_id: $json.event_id, n8n_execution_id: $execution.id, file_id: $json.file_id, submission_id: $json.submission_id, user_id: $json.user_id, role: 'professor', openai_result: $json.openai_result, claude_review: $json.claude_review, gate_decision: $json.gate_decision, workflow_version: 'v2' }) }}"
+      },
+      "id": "wf014p-0014",
+      "name": "Submit Result",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [2600, 540]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env['BACKEND_INTERNAL_URL'] }}/internal/assessment/metric",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type",      "value": "application/json" },
+            { "name": "X-Internal-Secret", "value": "={{ $env['BACKEND_INTERNAL_SECRET'] }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\"metric\": \"professor.completed\", \"value\": 1}"
+      },
+      "id": "wf014p-0015",
+      "name": "Metric: Completed",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [2840, 540]
+    },
+    {
+      "parameters": {
+        "options": { "responseCode": 202 },
+        "respondWith": "json",
+        "responseBody": "={\"status\": \"processed\", \"assessment_id\": $node['Submit Result'].json.assessment_id}"
+      },
+      "id": "wf014p-0016",
+      "name": "Respond 202 OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [3080, 540]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [[{ "node": "Verify HMAC", "type": "main", "index": 0 }]]
+    },
+    "Verify HMAC": {
+      "main": [[{ "node": "Validate Role (professor)", "type": "main", "index": 0 }]]
+    },
+    "Validate Role (professor)": {
+      "main": [[{ "node": "Check Idempotency", "type": "main", "index": 0 }]]
+    },
+    "Check Idempotency": {
+      "main": [[{ "node": "Is Duplicate?", "type": "main", "index": 0 }]]
+    },
+    "Is Duplicate?": {
+      "main": [
+        [{ "node": "Fetch Rubric Context",   "type": "main", "index": 0 }],
+        [{ "node": "Respond 200 Duplicate",  "type": "main", "index": 0 }]
+      ]
+    },
+    "Fetch Rubric Context": {
+      "main": [[{ "node": "Call OpenAI (Primary)", "type": "main", "index": 0 }]]
+    },
+    "Call OpenAI (Primary)": {
+      "main": [[{ "node": "Call Claude (Reviewer)", "type": "main", "index": 0 }]]
+    },
+    "Call Claude (Reviewer)": {
+      "main": [[{ "node": "Compute Gate Decision", "type": "main", "index": 0 }]]
+    },
+    "Compute Gate Decision": {
+      "main": [[{ "node": "Should Escalate?", "type": "main", "index": 0 }]]
+    },
+    "Should Escalate?": {
+      "main": [
+        [{ "node": "Submit Result",       "type": "main", "index": 0 }],
+        [{ "node": "Create Escalation",   "type": "main", "index": 0 }]
+      ]
+    },
+    "Create Escalation": {
+      "main": [[{ "node": "Respond 202 Escalated", "type": "main", "index": 0 }]]
+    },
+    "Submit Result": {
+      "main": [[{ "node": "Metric: Completed", "type": "main", "index": 0 }]]
+    },
+    "Metric: Completed": {
+      "main": [[{ "node": "Respond 202 OK", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": {
+    "errorWorkflow": "",
+    "executionOrder": "v1"
+  },
+  "tags": [
+    { "name": "phase14" },
+    { "name": "v2" },
+    { "name": "assessment" },
+    { "name": "professor" }
+  ]
+}

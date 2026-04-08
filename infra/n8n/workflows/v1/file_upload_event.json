@@ -1,0 +1,217 @@
+{
+  "name": "EduAI — File Upload Event v2",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "file-upload-event",
+        "options": { "rawBody": true },
+        "responseMode": "responseNode"
+      },
+      "id": "wf001v2-0001",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [200, 300],
+      "webhookId": "eduai-file-upload-v2"
+    },
+    {
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\n\nconst HMAC_SECRET   = $env['N8N_WEBHOOK_HMAC_SECRET'];\nconst MAX_SKEW_SECS = 300;\n\nconst item    = $input.first();\nconst headers = item.json.headers || {};\n\nconst sigHeader = headers['x-eduai-signature-256']   || '';\nconst tsHeader  = headers['x-eduai-timestamp']       || '';\nconst idempKey  = headers['x-eduai-idempotency-key'] || '';\n\nconst nowSecs = Math.floor(Date.now() / 1000);\nconst tsSecs  = parseInt(tsHeader, 10);\nif (isNaN(tsSecs) || Math.abs(nowSecs - tsSecs) > MAX_SKEW_SECS) {\n  throw new Error(`Timestamp rejected: skew=${nowSecs - tsSecs}s`);\n}\n\nconst rawBody  = item.json.rawBody || JSON.stringify(item.json.body);\nconst expected = 'sha256=' + crypto.createHmac('sha256', HMAC_SECRET).update(rawBody, 'utf8').digest('hex');\nconst sigBuf = Buffer.from(sigHeader);\nconst expBuf = Buffer.from(expected);\nif (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {\n  throw new Error('Signature verification failed');\n}\n\nconst body = typeof rawBody === 'string' ? JSON.parse(rawBody) : rawBody;\nreturn [{ json: { ...body, _idempotency_key: idempKey, _verified: true } }];"
+      },
+      "id": "wf001v2-0002",
+      "name": "Verify HMAC Signature",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── Deliverable 2: Role Isolation ──────────────────────────────────────────\n// File-upload events are only valid for student and professor actors.\n// Admin accounts do not submit assignments; system events use a different path.\nconst ALLOWED_ROLES = ['student', 'professor'];\n\nconst item = $input.first();\nconst role = (item.json.payload || {}).role || '';\n\nif (!ALLOWED_ROLES.includes(role)) {\n  console.error(JSON.stringify({\n    level: 'error', message: 'role_rejected',\n    role, allowed: ALLOWED_ROLES,\n    event_id: item.json.event_id,\n  }));\n  throw new Error(`Role '${role}' is not permitted in the file-upload workflow. Allowed: ${ALLOWED_ROLES.join(', ')}`);\n}\n\nreturn [{ json: { ...item.json, _role_validated: true } }];"
+      },
+      "id": "wf001v2-0003",
+      "name": "Validate Role",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env['BACKEND_INTERNAL_URL'] }}/internal/idempotency/check",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type",      "value": "application/json" },
+            { "name": "X-Internal-Secret", "value": "={{ $env['BACKEND_INTERNAL_SECRET'] }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ event_id: $json.event_id, ttl_seconds: 86400 }) }}",
+        "options": {
+          "response": { "response": { "fullResponse": false } },
+          "timeout": 5000
+        }
+      },
+      "id": "wf001v2-0004",
+      "name": "Check Idempotency",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [920, 300],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Merge the idempotency API response with the full verified payload.\n// Fail-open: if backend was unreachable ($input has an error object),\n// treat the event as fresh so processing is never silently dropped.\nconst verified  = $('Validate Role').item.json;\nconst idempResp = $input.first().json;\n\n// idempResp.fresh === false  → duplicate (already processed)\n// idempResp.fresh === true   → new event\n// idempResp.error exists     → Redis/backend unreachable → fail-open → treat as new\nconst isDuplicate = idempResp.fresh === false && !idempResp.error;\n\nif (isDuplicate) {\n  console.log(JSON.stringify({\n    level: 'info', message: 'event_duplicate_skipped',\n    event_id: verified.event_id,\n    idempotency_key: verified._idempotency_key,\n  }));\n} else if (idempResp.error) {\n  console.warn(JSON.stringify({\n    level: 'warn', message: 'idempotency_backend_unreachable_fail_open',\n    event_id: verified.event_id,\n    error: String(idempResp.error).slice(0, 200),\n  }));\n}\n\nreturn [{ json: { ...verified, _is_duplicate: isDuplicate } }];"
+      },
+      "id": "wf001v2-0005",
+      "name": "Resolve Idempotency",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1160, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": false },
+          "conditions": [
+            {
+              "id": "is-dup",
+              "leftValue": "={{ $json._is_duplicate }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equals" }
+            }
+          ]
+        }
+      },
+      "id": "wf001v2-0006",
+      "name": "Is Duplicate?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1400, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── Deliverable 4: Structured event log ────────────────────────────────────\nconst item    = $input.first();\nconst payload = item.json.payload || {};\n\nconsole.log(JSON.stringify({\n  level:          'info',\n  message:        'file_upload_event_processed',\n  event_id:       item.json.event_id,\n  event_type:     item.json.event_type,\n  correlation_id: item.json.correlation_id,\n  file_id:        payload.file_id,\n  user_id:        payload.user_id,\n  role:           payload.role,\n  file_type:      payload.file_type,\n  file_size_bytes: payload.file_size_bytes,\n  timestamp:      new Date().toISOString(),\n}));\n\nreturn [{ json: { ...item.json, _processed_at: new Date().toISOString() } }];"
+      },
+      "id": "wf001v2-0007",
+      "name": "Log Event",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1640, 180]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env['BACKEND_INTERNAL_URL'] }}/internal/events/metric",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type",      "value": "application/json" },
+            { "name": "X-Internal-Secret", "value": "={{ $env['BACKEND_INTERNAL_SECRET'] }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"metric\": \"file_upload.processed\", \"value\": 1 }",
+        "options": { "timeout": 3000 }
+      },
+      "id": "wf001v2-0008",
+      "name": "Metric: processed",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1880, 180],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ status: 'accepted', event_id: $('Verify HMAC Signature').item.json.event_id }) }}",
+        "options": { "responseCode": 202 }
+      },
+      "id": "wf001v2-0009",
+      "name": "Respond 202 Accepted",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [2120, 180]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env['BACKEND_INTERNAL_URL'] }}/internal/events/metric",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type",      "value": "application/json" },
+            { "name": "X-Internal-Secret", "value": "={{ $env['BACKEND_INTERNAL_SECRET'] }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"metric\": \"file_upload.duplicate_skipped\", \"value\": 1 }",
+        "options": { "timeout": 3000 }
+      },
+      "id": "wf001v2-0010",
+      "name": "Metric: duplicate",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1640, 420],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ status: 'duplicate', event_id: $('Verify HMAC Signature').item.json.event_id }) }}",
+        "options": { "responseCode": 200 }
+      },
+      "id": "wf001v2-0011",
+      "name": "Respond 200 Duplicate",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1880, 420]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [[{ "node": "Verify HMAC Signature", "type": "main", "index": 0 }]]
+    },
+    "Verify HMAC Signature": {
+      "main": [[{ "node": "Validate Role", "type": "main", "index": 0 }]]
+    },
+    "Validate Role": {
+      "main": [[{ "node": "Check Idempotency", "type": "main", "index": 0 }]]
+    },
+    "Check Idempotency": {
+      "main": [[{ "node": "Resolve Idempotency", "type": "main", "index": 0 }]]
+    },
+    "Resolve Idempotency": {
+      "main": [[{ "node": "Is Duplicate?", "type": "main", "index": 0 }]]
+    },
+    "Is Duplicate?": {
+      "main": [
+        [{ "node": "Metric: duplicate",  "type": "main", "index": 0 }],
+        [{ "node": "Log Event",          "type": "main", "index": 0 }]
+      ]
+    },
+    "Metric: duplicate": {
+      "main": [[{ "node": "Respond 200 Duplicate", "type": "main", "index": 0 }]]
+    },
+    "Log Event": {
+      "main": [[{ "node": "Metric: processed", "type": "main", "index": 0 }]]
+    },
+    "Metric: processed": {
+      "main": [[{ "node": "Respond 202 Accepted", "type": "main", "index": 0 }]]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "errorWorkflow": ""
+  },
+  "active": false,
+  "versionId": "eduai-file-upload-v2-0",
+  "id": "wf-file-upload-event-v2",
+  "tags": ["phase13", "events", "v2", "role-isolation", "redis-idempotency"]
+}

@@ -1,0 +1,126 @@
+{
+  "name": "EduAI — File Upload Event",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "file-upload-event",
+        "options": {
+          "rawBody": true
+        },
+        "responseMode": "responseNode"
+      },
+      "id": "a1b2c3d4-0001-0001-0001-a1b2c3d40001",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [200, 300],
+      "webhookId": "eduai-file-upload-v1"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================\n// HMAC-SHA256 Signature Verification\n// Mirrors the logic in backend/app/events/signing.py\n// ============================================================\n\nconst crypto = require('crypto');\n\nconst HMAC_SECRET   = $env['N8N_WEBHOOK_HMAC_SECRET'];\nconst MAX_SKEW_SECS = 300; // must match N8N_TIMESTAMP_TOLERANCE_SECONDS\n\nconst item = $input.first();\nconst headers = item.json.headers || {};\n\n// 1. Extract headers (header names are lowercased by n8n)\nconst sigHeader = headers['x-eduai-signature-256'] || '';\nconst tsHeader  = headers['x-eduai-timestamp']     || '';\nconst idempKey  = headers['x-eduai-idempotency-key'] || '';\n\n// 2. Timestamp freshness check\nconst nowSecs = Math.floor(Date.now() / 1000);\nconst tsSecs  = parseInt(tsHeader, 10);\nif (isNaN(tsSecs) || Math.abs(nowSecs - tsSecs) > MAX_SKEW_SECS) {\n  throw new Error(`Timestamp rejected: skew=${nowSecs - tsSecs}s, max=${MAX_SKEW_SECS}s`);\n}\n\n// 3. Signature verification — compare over raw body bytes\nconst rawBody = item.json.rawBody || JSON.stringify(item.json.body);\nconst expected = 'sha256=' + crypto\n  .createHmac('sha256', HMAC_SECRET)\n  .update(rawBody, 'utf8')\n  .digest('hex');\n\n// constant-time comparison\nconst sigBuf = Buffer.from(sigHeader);\nconst expBuf = Buffer.from(expected);\nif (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {\n  throw new Error('Signature verification failed');\n}\n\n// 4. Parse and forward the verified body\nlet body;\ntry {\n  body = typeof rawBody === 'string' ? JSON.parse(rawBody) : rawBody;\n} catch (e) {\n  throw new Error('Invalid JSON body: ' + e.message);\n}\n\n// Attach idempotency key for downstream deduplication\nreturn [{ json: { ...body, _idempotency_key: idempKey, _verified: true } }];"
+      },
+      "id": "a1b2c3d4-0001-0002-0001-a1b2c3d40002",
+      "name": "Verify HMAC Signature",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================\n// Idempotency Gate\n// Uses n8n's static data to remember processed event_ids.\n// In production replace with a Redis SET NX call via HTTP Request node.\n// ============================================================\n\nconst item = $input.first();\nconst eventId = item.json.event_id || '';\n\nif (!eventId) {\n  throw new Error('event_id is required for idempotency');\n}\n\n// Retrieve processed set from workflow static data\nconst workflowStaticData = $getWorkflowStaticData('global');\nif (!workflowStaticData.processedEvents) {\n  workflowStaticData.processedEvents = {};\n}\n\nif (workflowStaticData.processedEvents[eventId]) {\n  // Already processed — short-circuit with a 200 so the emitter doesn't retry\n  return [{ json: { duplicate: true, event_id: eventId, status: 'already_processed' } }];\n}\n\n// Mark as processed (TTL-based eviction not available in static data;\n// rotate the map when it exceeds 10000 entries to bound memory)\nconst keys = Object.keys(workflowStaticData.processedEvents);\nif (keys.length > 10000) {\n  // Drop the oldest 2000 entries (insertion order)\n  keys.slice(0, 2000).forEach(k => delete workflowStaticData.processedEvents[k]);\n}\nworkflowStaticData.processedEvents[eventId] = Date.now();\n\nreturn [{ json: { ...item.json, duplicate: false } }];"
+      },
+      "id": "a1b2c3d4-0001-0003-0001-a1b2c3d40003",
+      "name": "Idempotency Gate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true },
+          "conditions": [
+            {
+              "id": "dup-check",
+              "leftValue": "={{ $json.duplicate }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equals" }
+            }
+          ]
+        }
+      },
+      "id": "a1b2c3d4-0001-0004-0001-a1b2c3d40004",
+      "name": "Is Duplicate?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [920, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================\n// Structured Event Log\n// In production: forward to your logging pipeline (Loki, Datadog, etc.)\n// via an HTTP Request node instead of console.log.\n// ============================================================\n\nconst item = $input.first();\nconst payload = item.json.payload || {};\n\nconst logEntry = {\n  level: 'info',\n  event_id:       item.json.event_id,\n  event_type:     item.json.event_type,\n  schema_version: item.json.schema_version,\n  correlation_id: item.json.correlation_id,\n  timestamp:      item.json.timestamp,\n  received_at:    new Date().toISOString(),\n  file_id:        payload.file_id,\n  user_id:        payload.user_id,\n  role:           payload.role,\n  file_name:      payload.file_name,\n  file_size_bytes: payload.file_size_bytes,\n  mime_type:      payload.mime_type,\n  submission_id:  payload.submission_id,\n};\n\nconsole.log(JSON.stringify(logEntry));\n\nreturn [{ json: { log_entry: logEntry, processed: true } }];"
+      },
+      "id": "a1b2c3d4-0001-0005-0001-a1b2c3d40005",
+      "name": "Log Event",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1160, 200]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"status\": \"accepted\", \"event_id\": \"{{ $('Verify HMAC Signature').item.json.event_id }}\" }",
+        "options": { "responseCode": 202 }
+      },
+      "id": "a1b2c3d4-0001-0006-0001-a1b2c3d40006",
+      "name": "Respond 202 Accepted",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1400, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"status\": \"duplicate\", \"event_id\": \"{{ $('Idempotency Gate').item.json.event_id }}\" }",
+        "options": { "responseCode": 200 }
+      },
+      "id": "a1b2c3d4-0001-0007-0001-a1b2c3d40007",
+      "name": "Respond 200 Duplicate",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1160, 420]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [[{ "node": "Verify HMAC Signature", "type": "main", "index": 0 }]]
+    },
+    "Verify HMAC Signature": {
+      "main": [[{ "node": "Idempotency Gate", "type": "main", "index": 0 }]]
+    },
+    "Idempotency Gate": {
+      "main": [[{ "node": "Is Duplicate?", "type": "main", "index": 0 }]]
+    },
+    "Is Duplicate?": {
+      "main": [
+        [{ "node": "Respond 200 Duplicate", "type": "main", "index": 0 }],
+        [{ "node": "Log Event",             "type": "main", "index": 0 }]
+      ]
+    },
+    "Log Event": {
+      "main": [[{ "node": "Respond 202 Accepted", "type": "main", "index": 0 }]]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": ""
+  },
+  "active": false,
+  "versionId": "eduai-file-upload-v1-0",
+  "id": "wf-file-upload-event",
+  "tags": ["phase13", "events", "ingestion"]
+}
