@@ -4,8 +4,9 @@ import os
 import zipfile
 import base64
 import hashlib
+from importlib import import_module
 from io import BytesIO
-from typing import Tuple, Optional
+from typing import Any, Optional, Tuple
 import tempfile
 import subprocess
 import threading
@@ -14,8 +15,6 @@ from fastapi import FastAPI, UploadFile, File, Header, HTTPException
 from pypdf import PdfReader
 from docx import Document
 import csv
-from openpyxl import load_workbook
-from PIL import Image, ImageOps, ImageFilter
 
 # Optional OCR dependency
 try:
@@ -61,6 +60,8 @@ WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cpu")             # cpu/cuda (late
 # Cache whisper model (load once)
 _whisper_model = None
 _whisper_lock = threading.Lock()
+_load_workbook_fn = None
+_pillow_modules = None
 
 
 # -------------------------
@@ -104,6 +105,40 @@ def _ensure_ffmpeg() -> None:
         subprocess.run(["ffmpeg", "-version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
     except Exception:
         raise HTTPException(status_code=500, detail="ffmpeg not available in parser image")
+
+
+def _load_openpyxl_load_workbook():
+    global _load_workbook_fn
+    if _load_workbook_fn is not None:
+        return _load_workbook_fn
+
+    try:
+        openpyxl = import_module("openpyxl")
+    except ModuleNotFoundError as exc:
+        raise HTTPException(status_code=501, detail="XLSX parsing unavailable (install openpyxl)") from exc
+
+    load_workbook = getattr(openpyxl, "load_workbook", None)
+    if load_workbook is None:
+        raise HTTPException(status_code=500, detail="openpyxl.load_workbook is unavailable")
+
+    _load_workbook_fn = load_workbook
+    return _load_workbook_fn
+
+
+def _load_pillow_modules():
+    global _pillow_modules
+    if _pillow_modules is not None:
+        return _pillow_modules
+
+    try:
+        image_module = import_module("PIL.Image")
+        image_ops = import_module("PIL.ImageOps")
+        image_filter = import_module("PIL.ImageFilter")
+    except ModuleNotFoundError as exc:
+        raise HTTPException(status_code=501, detail="Image parsing unavailable (install pillow)") from exc
+
+    _pillow_modules = (image_module, image_ops, image_filter)
+    return _pillow_modules
 
 
 # -------------------------
@@ -260,6 +295,7 @@ def _parse_csv(blob: bytes) -> list[dict]:
 
 
 def _parse_xlsx(blob: bytes) -> list[dict]:
+    load_workbook = _load_openpyxl_load_workbook()
     wb = load_workbook(BytesIO(blob), read_only=True, data_only=True)
     out: list[dict] = []
     total_rows = 0
@@ -301,7 +337,8 @@ def _image_meta(img_bytes: bytes) -> dict:
     width = height = None
     fmt = None
     try:
-        with Image.open(BytesIO(img_bytes)) as im:
+        image_module, _, _ = _load_pillow_modules()
+        with image_module.open(BytesIO(img_bytes)) as im:
             width, height = im.size
             fmt = (im.format or "").upper() if im.format else None
     except Exception:
@@ -352,25 +389,27 @@ def _extract_images_pdf(blob: bytes) -> list[dict]:
 # -------------------------
 # OCR (stronger)
 # -------------------------
-def _preprocess_variants(im: Image.Image) -> list[Image.Image]:
+def _preprocess_variants(im: Any) -> list[Any]:
+    _, image_ops, image_filter = _load_pillow_modules()
+
     # Ensure we’re in RGB then grayscale (handles RGBA/LA/P)
     if im.mode not in ("RGB", "L"):
         im = im.convert("RGB")
 
-    variants: list[Image.Image] = []
+    variants: list[Any] = []
 
     # Base grayscale + upscale if small
-    g = ImageOps.grayscale(im)
+    g = image_ops.grayscale(im)
     w, h = g.size
     scale = 2 if max(w, h) < 1800 else 1
     if scale != 1:
         g = g.resize((w * scale, h * scale))
 
-    g = ImageOps.autocontrast(g)
+    g = image_ops.autocontrast(g)
     variants.append(g)
 
     # Sharpen
-    variants.append(g.filter(ImageFilter.UnsharpMask(radius=2, percent=180, threshold=2)))
+    variants.append(g.filter(image_filter.UnsharpMask(radius=2, percent=180, threshold=2)))
 
     # Binarize (good for screenshots/docs)
     thr = 180
@@ -378,12 +417,12 @@ def _preprocess_variants(im: Image.Image) -> list[Image.Image]:
     variants.append(bw)
 
     # Invert binarize (good for white text on dark background)
-    variants.append(ImageOps.invert(bw))
+    variants.append(image_ops.invert(bw))
 
     return variants
 
 
-def _run_ocr_best(im: Image.Image) -> Tuple[str, dict]:
+def _run_ocr_best(im: Any) -> Tuple[str, dict]:
     if not OCR_AVAILABLE or pytesseract is None:
         return "", {"ocr_available": False, "engine": "none"}
 
@@ -622,7 +661,8 @@ async def parse_ocr(
     filename = file.filename or "upload.bin"
 
     try:
-        im = Image.open(BytesIO(blob))
+        image_module, _, _ = _load_pillow_modules()
+        im = image_module.open(BytesIO(blob))
     except Exception:
         return {
             "text": "",

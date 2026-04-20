@@ -27,8 +27,10 @@ import {
 } from "lucide-react";
 
 import AssignmentUpload from "@/components/AssignmentUpload";
+import AICheckPanel from "@/components/ai/AICheckPanel";
 import { backendUrl } from "@/lib/backendUrl";
 import { fetchWithAuth } from "@/lib/fetchWithAuth";
+import { summarizeForCard } from "@/lib/reportSummary";
 
 type HistoryItem = {
   id: string;
@@ -251,6 +253,7 @@ export default function StudentDashboard() {
       { name: "Remaining", value: 100 - safe },
     ];
   }, [finalConfidence]);
+  const aiCheckFileId = latestFileId || latest?.item?.file_id || history?.[0]?.file_id || null;
 
   return (
     <div className="grid gap-6">
@@ -443,6 +446,14 @@ export default function StudentDashboard() {
         </div>
       </section>
 
+      {aiCheckFileId ? (
+        <AICheckPanel fileId={aiCheckFileId} role="student" />
+      ) : (
+        <section className="rounded-[30px] border border-dashed border-white/10 bg-white/[0.04] p-6 text-sm text-slate-400 shadow-[0_20px_70px_rgba(0,0,0,0.18)] backdrop-blur-xl">
+          Upload a file or open a recent report to load the AI checker for LangChain, LangGraph, GenAI, MCP, and n8n.
+        </section>
+      )}
+
       <section className="rounded-[30px] border border-white/10 bg-white/[0.05] p-5 shadow-[0_20px_80px_rgba(0,0,0,0.24)] backdrop-blur-xl">
         <div className="mb-5 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
           <div>
@@ -469,7 +480,7 @@ export default function StudentDashboard() {
                 h?.report_json?.model_agreement?.final_confidence;
 
               const band = confidenceBandFrom(fc);
-              const summary = h?.report_json?.summary;
+              const summary = summarizeForCard("student", h?.report_json, 240);
 
               return (
                 <Link
@@ -498,7 +509,7 @@ export default function StudentDashboard() {
                       </div>
 
                       <div className="mt-2 max-w-4xl text-sm leading-6 text-slate-400">
-                        {summary || "No summary available for this report yet."}
+                        {summary}
                       </div>
                     </div>
 

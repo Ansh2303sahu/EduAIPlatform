@@ -21,6 +21,15 @@ whisper_cache/
 # Your heavy ML artifacts (mount at runtime instead)
 app/models/
 models/
+datasets/
+tmp_train/
+tmp_train_quora/
+tmp_train_patent/
+tmp_train_prof_rubric/
+tmp_model/
+tmp_model_quora/
+tmp_model_patent/
+tmp_model_prof_rubric/
 
 # Git / IDE
 .git/

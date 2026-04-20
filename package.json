@@ -1,0 +1,13 @@
+{
+  "name": "eduai-platform",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.90.0",
+    "commander": "^14.0.3",
+    "fs-extra": "^11.3.4"
+  },
+  "bin": {
+    "claude": "./tools/claude-cli/claude.js"
+  }
+}

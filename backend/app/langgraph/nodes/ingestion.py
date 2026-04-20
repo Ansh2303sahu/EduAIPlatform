@@ -4,6 +4,8 @@ Wraps `app.services.report_generation_support` so the graph uses the same file
 loading, ingestion preparation, and submission-kind detection as Phase 10.
 """
 
+import time
+
 from ..adapters import report_support
 from ..schemas import Phase12NodeDescriptor
 from ..state import Phase12GraphState
@@ -22,13 +24,16 @@ NODE_SPEC = Phase12NodeDescriptor(
 async def run(state: Phase12GraphState) -> Phase12GraphState:
     """Populate the graph state with the standard file row and ingestion bundle."""
 
-    file_row = await report_support.load_file_for_state(state)
+    t0 = time.perf_counter()
+    file_row = state.file_row or await report_support.load_file_for_state(state)
     ingestion_bundle = await report_support.build_ingestion_bundle_for_state(state)
     submission_kind = report_support.detect_submission_kind(ingestion_bundle)
     state.file_row = file_row
     state.pipeline_context.ingestion = ingestion_bundle
     state.pipeline_context.submission_id = (
-        state.request.submission_id or ingestion_bundle.submission_id
+        state.request.submission_id
+        or str(file_row.get("submission_id") or "")
+        or state.pipeline_context.submission_id
     )
     state.apply_submission_kind(submission_kind)
     state.input_hash = report_support.sha256_json(
@@ -39,6 +44,7 @@ async def run(state: Phase12GraphState) -> Phase12GraphState:
             "ingestion": ingestion_bundle.model_dump(mode="json"),
         }
     )
+    state.pipeline_context.timings_ms["ingestion"] = int((time.perf_counter() - t0) * 1000)
     record_event(
         state,
         NODE_NAME,

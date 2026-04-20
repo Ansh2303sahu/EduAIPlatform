@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field
 from app.langchain.config import phase10_settings
 from app.langchain.enums import DecisionSource, ExecutionMode
 from app.services.audit import audit_log
+from app.services.uuid_normalization import uuid_or_none
 
 logger = logging.getLogger("phase10.execution")
 
@@ -48,6 +49,8 @@ def _prompt_version_for_role(role: str) -> str:
 
 class Phase10ExecutionRecord(BaseModel):
     """Structured execution metadata captured for one Phase 10 run."""
+
+    model_config = {"protected_namespaces": ()}
 
     request_id: str = ""
     role: str = ""
@@ -290,7 +293,10 @@ class Phase10ExecutionLogger(BaseCallbackHandler):
         else:
             self.record.raw_output_excerpt = None
 
-        return self.record.model_dump(exclude_none=True)
+        payload = self.record.model_dump(exclude_none=True)
+        payload["file_id"] = uuid_or_none(payload.get("file_id"))
+        payload["user_id"] = uuid_or_none(payload.get("user_id"))
+        return payload
 
     def emit(
         self,
@@ -304,15 +310,18 @@ class Phase10ExecutionLogger(BaseCallbackHandler):
 
         logger.info("phase10 execution_summary=%s", payload)
 
-        if self.record.user_id:
+        actor_user_id = uuid_or_none(self.record.user_id)
+        entity_id = uuid_or_none(self.record.file_id) or self.record.request_id
+
+        if actor_user_id:
             try:
                 loop = asyncio.get_running_loop()
                 loop.create_task(
                     audit_log(
-                        actor_user_id=self.record.user_id,
+                        actor_user_id=actor_user_id,
                         action="phase10.execution",
-                        entity_type="file" if self.record.file_id else "phase10_run",
-                        entity_id=self.record.file_id or self.record.request_id,
+                        entity_type="file" if uuid_or_none(self.record.file_id) else "phase10_run",
+                        entity_id=entity_id,
                         metadata=payload,
                     )
                 )
@@ -330,12 +339,15 @@ class Phase10ExecutionLogger(BaseCallbackHandler):
         if not self._enable_logging:
             return payload
 
-        if self.record.user_id:
+        actor_user_id = uuid_or_none(self.record.user_id)
+        entity_id = uuid_or_none(self.record.file_id) or self.record.request_id
+
+        if actor_user_id:
             await audit_log(
-                actor_user_id=self.record.user_id,
+                actor_user_id=actor_user_id,
                 action="phase10.execution",
-                entity_type="file" if self.record.file_id else "phase10_run",
-                entity_id=self.record.file_id or self.record.request_id,
+                entity_type="file" if uuid_or_none(self.record.file_id) else "phase10_run",
+                entity_id=entity_id,
                 metadata=payload,
             )
         else:

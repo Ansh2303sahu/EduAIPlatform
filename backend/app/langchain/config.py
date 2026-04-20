@@ -79,8 +79,8 @@ class LangChainSettings(_BaseSettings):  # type: ignore[misc]
         default="http://host.docker.internal:11434",
         alias="OLLAMA_BASE_URL",
     )
-    ollama_primary_model: str = Field(default="mistral:latest", alias="OLLAMA_PRIMARY_MODEL")
-    ollama_fallback_model: str = Field(default="gemma3:latest", alias="OLLAMA_FALLBACK_MODEL")
+    ollama_primary_model: str = Field(default="gemma3:4b", alias="OLLAMA_PRIMARY_MODEL")
+    ollama_fallback_model: str = Field(default="phi3:mini", alias="OLLAMA_FALLBACK_MODEL")
 
     # ── Anthropic / Claude ───────────────────────────────────────────────────
     anthropic_api_key: str = Field(default="", alias="ANTHROPIC_API_KEY")
@@ -95,31 +95,42 @@ class LangChainSettings(_BaseSettings):  # type: ignore[misc]
 
     # ── Generation limits ────────────────────────────────────────────────────
     timeout_seconds: int = Field(default=120, alias="PHASE10_TIMEOUT_SECONDS")
-    student_timeout_seconds: int = Field(default=210, alias="PHASE10_STUDENT_TIMEOUT_SECONDS")
-    professor_timeout_seconds: int = Field(default=210, alias="PHASE10_PROFESSOR_TIMEOUT_SECONDS")
+    student_timeout_seconds: int = Field(default=180, alias="PHASE10_STUDENT_TIMEOUT_SECONDS")
+    professor_timeout_seconds: int = Field(default=180, alias="PHASE10_PROFESSOR_TIMEOUT_SECONDS")
     max_retries: int = Field(default=2, alias="PHASE10_MAX_RETRIES")
-    max_context_chars: int = Field(default=50_000, alias="PHASE10_MAX_CONTEXT_CHARS")
+    max_context_chars: int = Field(default=18_000, alias="PHASE10_MAX_CONTEXT_CHARS")
     max_output_chars: int = Field(default=4096, alias="PHASE10_MAX_OUTPUT_CHARS")
-    student_max_output_tokens: int = Field(default=800, alias="PHASE10_STUDENT_MAX_OUTPUT_TOKENS")
-    professor_max_output_tokens: int = Field(default=900, alias="PHASE10_PROFESSOR_MAX_OUTPUT_TOKENS")
+    student_default_output_tokens: int = Field(default=1200, alias="PHASE10_STUDENT_DEFAULT_OUTPUT_TOKENS")
+    professor_default_output_tokens: int = Field(default=1200, alias="PHASE10_PROFESSOR_DEFAULT_OUTPUT_TOKENS")
+    student_min_output_tokens: int = Field(default=850, alias="PHASE10_STUDENT_MIN_OUTPUT_TOKENS")
+    professor_min_output_tokens: int = Field(default=900, alias="PHASE10_PROFESSOR_MIN_OUTPUT_TOKENS")
+    student_max_output_tokens: int = Field(default=1400, alias="PHASE10_STUDENT_MAX_OUTPUT_TOKENS")
+    professor_max_output_tokens: int = Field(default=1400, alias="PHASE10_PROFESSOR_MAX_OUTPUT_TOKENS")
+    output_budget_short_chars: int = Field(default=2500, alias="PHASE10_OUTPUT_BUDGET_SHORT_CHARS")
+    output_budget_medium_chars: int = Field(default=7000, alias="PHASE10_OUTPUT_BUDGET_MEDIUM_CHARS")
     student_project_top_k: int = Field(default=8, alias="PHASE10_STUDENT_PROJECT_TOP_K")
     student_academic_top_k: int = Field(default=6, alias="PHASE10_STUDENT_ACADEMIC_TOP_K")
     professor_project_top_k: int = Field(default=8, alias="PHASE10_PROFESSOR_PROJECT_TOP_K")
     professor_academic_top_k: int = Field(default=6, alias="PHASE10_PROFESSOR_ACADEMIC_TOP_K")
-    prompt_submission_text_chars: int = Field(default=2200, alias="PHASE10_PROMPT_SUBMISSION_TEXT_CHARS")
-    prompt_ocr_chars: int = Field(default=500, alias="PHASE10_PROMPT_OCR_CHARS")
-    prompt_transcript_chars: int = Field(default=500, alias="PHASE10_PROMPT_TRANSCRIPT_CHARS")
-    prompt_table_chars: int = Field(default=700, alias="PHASE10_PROMPT_TABLE_CHARS")
-    prompt_submission_summary_chars: int = Field(default=420, alias="PHASE10_PROMPT_SUBMISSION_SUMMARY_CHARS")
-    prompt_trace_excerpt_chars: int = Field(default=180, alias="PHASE10_PROMPT_TRACE_EXCERPT_CHARS")
-    prompt_rag_context_chars: int = Field(default=1800, alias="PHASE10_PROMPT_RAG_CONTEXT_CHARS")
-    prompt_rag_citation_limit: int = Field(default=4, alias="PHASE10_PROMPT_RAG_CITATION_LIMIT")
-    prompt_rag_chunk_preview_limit: int = Field(default=2, alias="PHASE10_PROMPT_RAG_CHUNK_PREVIEW_LIMIT")
-    prompt_rag_chunk_preview_chars: int = Field(default=120, alias="PHASE10_PROMPT_RAG_CHUNK_PREVIEW_CHARS")
+    prompt_submission_text_chars: int = Field(default=2600, alias="PHASE10_PROMPT_SUBMISSION_TEXT_CHARS")
+    prompt_ocr_chars: int = Field(default=650, alias="PHASE10_PROMPT_OCR_CHARS")
+    prompt_transcript_chars: int = Field(default=650, alias="PHASE10_PROMPT_TRANSCRIPT_CHARS")
+    prompt_table_chars: int = Field(default=900, alias="PHASE10_PROMPT_TABLE_CHARS")
+    prompt_submission_summary_chars: int = Field(default=520, alias="PHASE10_PROMPT_SUBMISSION_SUMMARY_CHARS")
+    prompt_trace_excerpt_chars: int = Field(default=220, alias="PHASE10_PROMPT_TRACE_EXCERPT_CHARS")
+    prompt_rag_context_chars: int = Field(default=2200, alias="PHASE10_PROMPT_RAG_CONTEXT_CHARS")
+    prompt_rag_citation_limit: int = Field(default=5, alias="PHASE10_PROMPT_RAG_CITATION_LIMIT")
+    prompt_rag_chunk_preview_limit: int = Field(default=3, alias="PHASE10_PROMPT_RAG_CHUNK_PREVIEW_LIMIT")
+    prompt_rag_chunk_preview_chars: int = Field(default=140, alias="PHASE10_PROMPT_RAG_CHUNK_PREVIEW_CHARS")
 
     # ── Per-role temperatures ────────────────────────────────────────────────
-    student_temperature: float = Field(default=0.1, alias="PHASE10_STUDENT_TEMPERATURE")
-    professor_temperature: float = Field(default=0.05, alias="PHASE10_PROFESSOR_TEMPERATURE")
+    student_temperature: float = Field(default=0.15, alias="PHASE10_STUDENT_TEMPERATURE")
+    professor_temperature: float = Field(default=0.15, alias="PHASE10_PROFESSOR_TEMPERATURE")
+    ollama_num_ctx: int = Field(default=8192, alias="OLLAMA_NUM_CTX")
+    ollama_max_num_ctx: int = Field(default=8192, alias="OLLAMA_MAX_NUM_CTX")
+    ollama_top_p: float = Field(default=0.9, alias="OLLAMA_TOP_P")
+    ollama_top_k: int = Field(default=40, alias="OLLAMA_TOP_K")
+    ollama_repeat_penalty: float = Field(default=1.12, alias="OLLAMA_REPEAT_PENALTY")
 
     # ── Feature toggles ──────────────────────────────────────────────────────
     store_raw_output: bool = Field(default=False, alias="PHASE10_STORE_RAW_OUTPUT")
@@ -183,11 +194,26 @@ class LangChainSettings(_BaseSettings):  # type: ignore[misc]
             return self.professor_timeout_seconds
         return self.student_timeout_seconds
 
-    def output_tokens_for(self, role: Union[str, ChainRole]) -> int:
+    def output_tokens_for(
+        self,
+        role: Union[str, ChainRole],
+        *,
+        submission_chars: int | None = None,
+    ) -> int:
         role_str = role.value if isinstance(role, ChainRole) else str(role).lower()
-        if role_str == ChainRole.PROFESSOR.value:
-            return self.professor_max_output_tokens
-        return self.student_max_output_tokens
+        is_professor = role_str == ChainRole.PROFESSOR.value
+        minimum = self.professor_min_output_tokens if is_professor else self.student_min_output_tokens
+        default = self.professor_default_output_tokens if is_professor else self.student_default_output_tokens
+        maximum = self.professor_max_output_tokens if is_professor else self.student_max_output_tokens
+
+        chars = max(0, int(submission_chars or 0))
+        if chars <= 0:
+            return default
+        if chars <= self.output_budget_short_chars:
+            return minimum
+        if chars <= self.output_budget_medium_chars:
+            return min(maximum, int(round((minimum + default) / 2)))
+        return min(maximum, default)
 
     # ── Backward-compatible aliases (used by existing service files) ─────────
     # These are plain properties so they do not participate in pydantic

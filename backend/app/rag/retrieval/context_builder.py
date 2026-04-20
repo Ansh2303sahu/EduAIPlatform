@@ -9,6 +9,7 @@ from app.rag.config import get_rag_runtime_config
 from app.rag.rag_llm_pipeline import build_context as build_grounding_context
 from app.rag.retrieval.professor_retriever import retrieve_professor_context
 from app.rag.retrieval.student_retriever import retrieve_student_context
+from app.services import report_generation_support as report_support
 
 logger = logging.getLogger("rag.context_builder")
 
@@ -31,6 +32,7 @@ _ESSAY_KW = {
     "risk assessment", "cia triad", "nist", "stride", "gdpr", "policy",
     "evaluation", "discussion", "introduction", "abstract", "governance",
     "compliance", "incident response", "research question",
+    "formative feedback", "higher education", "automated feedback", "pedagogical depth",
 }
 
 _PROFESSOR_KW = {
@@ -51,11 +53,43 @@ _STOPWORDS = {
     "would", "being", "been", "than", "then", "them", "they", "there", "because",
     "while", "does", "used", "using", "report", "student", "submission", "project",
     "essay", "review", "assessment", "analysis", "system", "platform", "quality",
+    "week", "weeks", "exercise", "exercises", "basic", "introduced", "introduces",
+    "demonstrates", "demonstrate", "created", "various", "task", "tasks", "extended",
 }
 
 _LOW_VALUE_TERMS = {
     "general", "guidance", "feedback", "structure", "evaluation", "discussion",
     "implementation", "methodology", "evidence", "technical", "academic",
+    "this",
+    "week", "weeks", "exercise", "exercises", "basic", "introduced", "introduces",
+    "demonstrates", "demonstrate", "created", "various", "task", "tasks", "extended",
+}
+
+_GENERIC_QUERY_TERMS = {
+    "student", "professor", "academic", "writing", "feedback", "report", "chapter",
+    "essay", "submission", "review", "structure", "argument", "evidence",
+    "referencing", "citation", "rubric", "policy", "moderation", "project",
+    "architecture", "implementation", "testing", "security",
+}
+
+_STUDENT_MODE_HINTS = {
+    "essay": "academic writing argument evidence",
+    "report": "academic report structure evidence",
+    "chapter": "introduction chapter academic argument",
+    "code": "software project implementation review",
+    "mixed": "submission critique grounded revision",
+    "reflection": "reflective writing theory practice",
+}
+
+_PROFESSOR_MODE_HINTS_QUERY = {
+    "essay": "academic writing rubric alignment",
+    "report": "academic report rubric alignment",
+    "chapter": "chapter structure rubric alignment",
+    "project": "project rubric moderation",
+    "feedback": "feedback template moderation",
+    "policy": "marking policy moderation",
+    "moderation": "moderation rubric",
+    "rubric": "rubric criteria alignment",
 }
 
 _STUDENT_CODE_HINTS = (
@@ -115,7 +149,11 @@ def _extract_submission_title(text: str | None, *, fallback_query: str | None = 
     normalized = _normalize_space(text)
     if normalized:
         head = normalized[: runtime.query_excerpt_chars]
-        segments = [segment.strip(" :-|") for segment in re.split(r"[.\n\r]+", head) if segment.strip()]
+        segments = [
+            segment.strip(" :-|")
+            for segment in re.split(r"(?:[.!?](?=\s|$)|[\n\r]+)", head)
+            if segment.strip()
+        ]
         for segment in segments[:4]:
             if len(segment) < 12:
                 continue
@@ -252,9 +290,13 @@ def _student_feedback_mode(
     submission_type: str | None,
     text: str,
     query: str,
+    explicit_mode: str | None = None,
 ) -> str:
     normalized_analysis = (analysis_type or "").strip().lower()
     normalized_submission = (submission_type or "").strip().lower()
+    normalized_mode = (explicit_mode or "").strip().lower()
+    if normalized_mode in {"essay", "report", "chapter", "code", "mixed", "reflection", "generic"}:
+        return normalized_mode
     if normalized_analysis.endswith("project_review") or normalized_submission in {
         "project",
         "software_project",
@@ -264,6 +306,11 @@ def _student_feedback_mode(
         return "code"
 
     haystack = f"{query} {text}".lower()
+    if any(token in haystack for token in ("reflection", "reflective", "placement", "self-awareness", "self awareness")):
+        return "reflection"
+    form = report_support.classify_submission_form({"text_content": text})
+    if form in {"essay", "report", "chapter", "code", "mixed"}:
+        return form
     code_hits = sum(1 for term in _STUDENT_CODE_HINTS if term in haystack)
     essay_hits = sum(1 for term in _STUDENT_ESSAY_HINTS if term in haystack)
     return "code" if code_hits >= essay_hits + 2 else "essay"
@@ -275,9 +322,13 @@ def _professor_feedback_mode(
     submission_type: str | None,
     text: str,
     query: str,
+    explicit_mode: str | None = None,
 ) -> str:
     normalized_analysis = (analysis_type or "").strip().lower()
     normalized_submission = (submission_type or "").strip().lower()
+    normalized_mode = (explicit_mode or "").strip().lower()
+    if normalized_mode in {"essay", "report", "chapter", "project", "feedback", "policy", "moderation", "rubric"}:
+        return normalized_mode
     if normalized_analysis.endswith("project_review") or normalized_submission in {
         "project",
         "software_project",
@@ -323,6 +374,235 @@ def _retrieval_source_text(body: dict[str, Any]) -> tuple[str, bool]:
     return fallback_text, bool(fallback_text)
 
 
+def _query_term_set(text: str | None) -> set[str]:
+    return {
+        token
+        for token in _candidate_tokens(_normalize_space(text).lower())
+        if token not in _LOW_VALUE_TERMS
+    }
+
+
+def _ranked_focus_terms(text: str | None, *, title_hint: str | None = None, limit: int = 6) -> list[str]:
+    if not text:
+        return []
+    ranked: list[str] = []
+    for term, _count in _dynamic_keyword_candidates(text, title_hint=title_hint).most_common():
+        if term in _LOW_VALUE_TERMS or len(term) < 3:
+            continue
+        ranked.append(term)
+        if len(ranked) >= limit:
+            break
+    return ranked
+
+
+def _anchor_phrases(
+    *,
+    title_hint: str | None,
+    keywords: list[str],
+    text_excerpt: str | None,
+) -> list[str]:
+    anchors: list[str] = []
+    for phrase in keywords[:8]:
+        normalized = _normalize_space(phrase)
+        if normalized:
+            anchors.append(normalized)
+    anchors.extend(_ranked_focus_terms(title_hint, title_hint=title_hint, limit=4))
+    anchors.extend(_ranked_focus_terms(text_excerpt, title_hint=title_hint, limit=4))
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for phrase in anchors:
+        lowered = phrase.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        deduped.append(phrase)
+    return deduped[:8]
+
+
+def _anchor_token_set(
+    *,
+    title_hint: str | None,
+    keywords: list[str],
+    text_excerpt: str | None,
+) -> set[str]:
+    tokens: set[str] = set()
+    for phrase in _anchor_phrases(title_hint=title_hint, keywords=keywords, text_excerpt=text_excerpt):
+        tokens.update(_query_term_set(phrase))
+    return {
+        token
+        for token in tokens
+        if token not in _GENERIC_QUERY_TERMS
+    }
+
+
+def _query_is_submission_grounded(
+    query: str | None,
+    *,
+    title_hint: str | None,
+    keywords: list[str],
+    text_excerpt: str | None,
+) -> bool:
+    normalized = _normalize_space(query).lower()
+    if not normalized:
+        return False
+    query_tokens = _query_term_set(normalized)
+    if not query_tokens:
+        return False
+    anchor_tokens = _anchor_token_set(
+        title_hint=title_hint,
+        keywords=keywords,
+        text_excerpt=text_excerpt,
+    )
+    overlap = len(query_tokens & anchor_tokens)
+    generic_ratio = (
+        sum(1 for token in query_tokens if token in _GENERIC_QUERY_TERMS) / max(1, len(query_tokens))
+    )
+    if overlap >= 2:
+        return True
+    if overlap >= 1 and generic_ratio < 0.6:
+        return True
+    return False
+
+
+def _build_submission_query(
+    *,
+    audience: str,
+    mode: str,
+    title_hint: str | None,
+    keywords: list[str],
+    text_excerpt: str | None,
+    fallback_query: str,
+) -> str:
+    anchors = _anchor_phrases(
+        title_hint=title_hint,
+        keywords=keywords,
+        text_excerpt=text_excerpt,
+    )
+    mode_hint = (
+        _STUDENT_MODE_HINTS.get(mode, "submission critique")
+        if audience == "student"
+        else _PROFESSOR_MODE_HINTS_QUERY.get(mode, "rubric alignment")
+    )
+    parts = anchors[:6]
+    if mode_hint:
+        parts.append(mode_hint)
+    query = _normalize_space(" ".join(part for part in parts if part))
+    if query:
+        return query[:240]
+    return _normalize_space(fallback_query)[:240]
+
+
+def _select_retrieval_query(
+    *,
+    audience: str,
+    mode: str,
+    provided_query: str,
+    fallback_query: str,
+    title_hint: str | None,
+    keywords: list[str],
+    text_excerpt: str | None,
+) -> str:
+    if _query_is_submission_grounded(
+        provided_query,
+        title_hint=title_hint,
+        keywords=keywords,
+        text_excerpt=text_excerpt,
+    ):
+        return _normalize_space(provided_query)[:240]
+    return _build_submission_query(
+        audience=audience,
+        mode=mode,
+        title_hint=title_hint,
+        keywords=keywords,
+        text_excerpt=text_excerpt,
+        fallback_query=fallback_query or provided_query,
+    )
+
+
+def _chunk_haystack(chunk: Any) -> str:
+    return _normalize_space(
+        " ".join(
+            [
+                str(getattr(chunk, "document_title", "") or ""),
+                str(getattr(chunk, "section", "") or ""),
+                str(getattr(chunk, "category", "") or ""),
+                str(getattr(chunk, "content", "") or ""),
+            ]
+        )
+    ).lower()
+
+
+def _apply_grounding_gate(
+    *,
+    chunks: list[Any],
+    citations: list[Any],
+    confidence_score: float,
+    confidence_label: str,
+    safe_review: bool,
+    title_hint: str | None,
+    keywords: list[str],
+    text_excerpt: str | None,
+) -> tuple[list[Any], list[Any], str, float, str, bool, dict[str, Any]]:
+    anchor_phrases = _anchor_phrases(
+        title_hint=title_hint,
+        keywords=keywords,
+        text_excerpt=text_excerpt,
+    )
+    anchor_tokens = _anchor_token_set(
+        title_hint=title_hint,
+        keywords=keywords,
+        text_excerpt=text_excerpt,
+    )
+    aligned_count = 0
+    for chunk in chunks:
+        haystack = _chunk_haystack(chunk)
+        phrase_hits = sum(
+            1
+            for phrase in anchor_phrases
+            if len(phrase.split()) >= 2 and phrase.lower() in haystack
+        )
+        token_hits = len(_query_term_set(haystack) & anchor_tokens)
+        if phrase_hits >= 1 or token_hits >= 2:
+            aligned_count += 1
+
+    top_score = max((float(getattr(chunk, "score", 0.0) or 0.0) for chunk in chunks), default=0.0)
+    rejection_reasons: list[str] = []
+    if safe_review:
+        rejection_reasons.append("safe_review")
+    if not chunks:
+        rejection_reasons.append("no_chunks")
+    if top_score < 0.36:
+        rejection_reasons.append("top_chunk_score_low")
+    if anchor_tokens and aligned_count < 2:
+        rejection_reasons.append("insufficient_topic_alignment")
+    if str(confidence_label or "").strip().lower() == "low":
+        rejection_reasons.append("low_confidence")
+
+    reject_grounding = bool(rejection_reasons)
+    trace_meta = {
+        "grounding_rejected": reject_grounding,
+        "grounding_rejection_reasons": rejection_reasons,
+        "submission_alignment_count": aligned_count,
+        "submission_alignment_required": bool(anchor_tokens),
+        "submission_alignment_terms": anchor_phrases[:6],
+        "top_chunk_score": round(top_score, 3),
+        "approved_chunk_count": 0 if reject_grounding else len(chunks),
+        "rejected_chunk_count": len(chunks) if reject_grounding else 0,
+    }
+    if reject_grounding:
+        return [], [], "", min(float(confidence_score or 0.0), 0.2), "low", True, trace_meta
+    return (
+        chunks,
+        citations,
+        build_grounding_context(chunks),
+        float(confidence_score or 0.0),
+        str(confidence_label or "low"),
+        bool(safe_review),
+        trace_meta,
+    )
+
+
 def _instruction(
     *,
     audience: str,
@@ -345,9 +625,11 @@ def _instruction(
             )
         else:
             strong = (
-                "Use the retrieved sources as grounding context for academic student feedback. "
-                "Anchor feedback in structure, evidence use, critical analysis, clarity, academic writing quality, "
-                "and citation/referencing guidance where supported."
+                "Use the retrieved sources only as secondary grounding for academic student feedback. "
+                "Start with the submission itself: paragraph clarity, claim specificity, evidence integration, "
+                "citation consistency, and argument flow. "
+                "Use retrieved material only to support referencing rules, structure expectations, or rubric alignment "
+                "when the retrieved material clearly matches the submission topic."
             )
     else:
         if analysis_type == "professor_project_review":
@@ -399,19 +681,21 @@ def build_student_rag_payload(body: dict) -> dict:
     analysis_type = str(body.get("analysis_type") or "").strip().lower() or None
     submission_type = body.get("submission_type")
     raw_text, degraded_input = _retrieval_source_text(body)
+    explicit_mode = str(body.get("submission_form") or body.get("mode") or "").strip().lower() or None
     query_fallback = (
         "software project evaluation architecture implementation testing quality"
         if analysis_type == "student_project_review"
         else "academic writing structure critical analysis evidence referencing"
     )
-    query = str(body.get("query") or body.get("prompt") or body.get("task") or query_fallback)
+    provided_query = str(body.get("query") or body.get("prompt") or body.get("task") or "")
     mode = _student_feedback_mode(
         analysis_type=analysis_type,
         submission_type=submission_type,
         text=raw_text,
-        query=query,
+        query=provided_query or query_fallback,
+        explicit_mode=explicit_mode,
     )
-    title_hint = _extract_submission_title(raw_text, fallback_query=query)
+    title_hint = _extract_submission_title(raw_text, fallback_query=provided_query or query_fallback)
     keywords = _extract_submission_keywords(
         raw_text,
         analysis_type,
@@ -420,6 +704,15 @@ def build_student_rag_payload(body: dict) -> dict:
         mode=mode,
     )
     text_excerpt = _submission_text_excerpt(raw_text)
+    query = _select_retrieval_query(
+        audience="student",
+        mode=mode,
+        provided_query=provided_query,
+        fallback_query=query_fallback,
+        title_hint=title_hint,
+        keywords=keywords,
+        text_excerpt=text_excerpt,
+    )
     top_k = int(body.get("top_k") or 6)
     if analysis_type == "student_project_review" or mode == "code":
         top_k = max(top_k, 8)
@@ -453,19 +746,31 @@ def build_student_rag_payload(body: dict) -> dict:
         mode=mode,
         degraded_input=degraded_input,
     )
+    approved_chunks, approved_citations, approved_context, approved_confidence, approved_label, approved_safe_review, trace_meta = _apply_grounding_gate(
+        chunks=list(result.chunks),
+        citations=list(result.citations),
+        confidence_score=result.confidence_score,
+        confidence_label=result.confidence_label,
+        safe_review=result.safe_review,
+        title_hint=title_hint,
+        keywords=keywords,
+        text_excerpt=text_excerpt,
+    )
+    trace_payload = result.trace.model_dump()
+    trace_payload.update(trace_meta)
 
     return {
-        "context": build_grounding_context(result.chunks),
-        "citations": [c.model_dump() for c in result.citations],
-        "retrieved_chunks": [c.model_dump() for c in result.chunks],
-        "confidence_score": result.confidence_score,
-        "confidence_label": result.confidence_label,
-        "safe_review": result.safe_review,
-        "trace": result.trace.model_dump(),
+        "context": approved_context,
+        "citations": [c.model_dump() for c in approved_citations],
+        "retrieved_chunks": [c.model_dump() for c in approved_chunks],
+        "confidence_score": approved_confidence,
+        "confidence_label": approved_label,
+        "safe_review": approved_safe_review,
+        "trace": trace_payload,
         "instruction": _instruction(
             audience="student",
-            confidence_label=result.confidence_label,
-            safe_review=result.safe_review,
+            confidence_label=approved_label,
+            safe_review=approved_safe_review,
             analysis_type=analysis_type,
         ),
     }
@@ -475,19 +780,21 @@ def build_professor_rag_payload(body: dict) -> dict:
     analysis_type = str(body.get("analysis_type") or "").strip().lower() or None
     submission_type = body.get("submission_type")
     raw_text, degraded_input = _retrieval_source_text(body)
+    explicit_mode = str(body.get("submission_form") or body.get("mode") or "").strip().lower() or None
     query_fallback = (
         "software project rubric marking criteria implementation assessment standards"
         if analysis_type == "professor_project_review"
         else "academic rubric marking policy moderation feedback guidance"
     )
-    query = str(body.get("query") or body.get("prompt") or body.get("task") or query_fallback)
+    provided_query = str(body.get("query") or body.get("prompt") or body.get("task") or "")
     mode = _professor_feedback_mode(
         analysis_type=analysis_type,
         submission_type=submission_type,
         text=raw_text,
-        query=query,
+        query=provided_query or query_fallback,
+        explicit_mode=explicit_mode,
     )
-    title_hint = _extract_submission_title(raw_text, fallback_query=query)
+    title_hint = _extract_submission_title(raw_text, fallback_query=provided_query or query_fallback)
     keywords = _extract_submission_keywords(
         raw_text,
         analysis_type,
@@ -496,6 +803,15 @@ def build_professor_rag_payload(body: dict) -> dict:
         mode=mode,
     )
     text_excerpt = _submission_text_excerpt(raw_text)
+    query = _select_retrieval_query(
+        audience="professor",
+        mode=mode,
+        provided_query=provided_query,
+        fallback_query=query_fallback,
+        title_hint=title_hint,
+        keywords=keywords,
+        text_excerpt=text_excerpt,
+    )
     top_k = int(body.get("top_k") or 6)
     if analysis_type == "professor_project_review" or mode == "project":
         top_k = max(top_k, 8)
@@ -531,19 +847,31 @@ def build_professor_rag_payload(body: dict) -> dict:
         mode=mode,
         degraded_input=degraded_input,
     )
+    approved_chunks, approved_citations, approved_context, approved_confidence, approved_label, approved_safe_review, trace_meta = _apply_grounding_gate(
+        chunks=list(result.chunks),
+        citations=list(result.citations),
+        confidence_score=result.confidence_score,
+        confidence_label=result.confidence_label,
+        safe_review=result.safe_review,
+        title_hint=title_hint,
+        keywords=keywords,
+        text_excerpt=text_excerpt,
+    )
+    trace_payload = result.trace.model_dump()
+    trace_payload.update(trace_meta)
 
     return {
-        "context": build_grounding_context(result.chunks),
-        "citations": [c.model_dump() for c in result.citations],
-        "retrieved_chunks": [c.model_dump() for c in result.chunks],
-        "confidence_score": result.confidence_score,
-        "confidence_label": result.confidence_label,
-        "safe_review": result.safe_review,
-        "trace": result.trace.model_dump(),
+        "context": approved_context,
+        "citations": [c.model_dump() for c in approved_citations],
+        "retrieved_chunks": [c.model_dump() for c in approved_chunks],
+        "confidence_score": approved_confidence,
+        "confidence_label": approved_label,
+        "safe_review": approved_safe_review,
+        "trace": trace_payload,
         "instruction": _instruction(
             audience="professor",
-            confidence_label=result.confidence_label,
-            safe_review=result.safe_review,
+            confidence_label=approved_label,
+            safe_review=approved_safe_review,
             analysis_type=analysis_type,
         ),
     }

@@ -92,9 +92,38 @@ def _normalize_reason(reason: str | None) -> FallbackReason:
     return _DEFAULT_REASON
 
 
+def _sanitize_detail(reason: FallbackReason, detail: str = "") -> str:
+    text = str(detail or "").strip()
+    if not text:
+        return ""
+
+    if reason == "ollama_unavailable":
+        lowered = text.lower()
+        if "model '" in lowered and "not installed" in lowered:
+            return "The configured local Ollama model is not installed."
+        if "model '" in lowered and "not found" in lowered:
+            return "The configured local Ollama model could not be found."
+        if (
+            "connection refused" in lowered
+            or "failed to connect" in lowered
+            or "all connection attempts failed" in lowered
+            or "could not reach ollama" in lowered
+        ):
+            return "The local Ollama service could not be reached."
+        if "timeout" in lowered:
+            return "The local Ollama service timed out."
+        if "404 not found" in lowered or "/api/generate" in lowered:
+            return "The configured local Ollama model could not be found."
+        return "The local language-model service was unavailable."
+
+    if len(text) > 240:
+        return f"{text[:240]}...<truncated>"
+    return text
+
+
 def _reason_message(reason: FallbackReason, detail: str = "") -> str:
     base = _REASON_MESSAGES[reason]
-    suffix = str(detail or "").strip()
+    suffix = _sanitize_detail(reason, detail)
     return f"{base} {suffix}".strip() if suffix else base
 
 

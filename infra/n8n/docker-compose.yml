@@ -116,7 +116,9 @@ services:
       # N8N_WEBHOOK_HMAC_SECRET     : secret read by HMAC Code nodes via $env
       NODE_FUNCTION_ALLOW_BUILTIN: "crypto,buffer"
       N8N_BLOCK_ENV_ACCESS_IN_NODE: "false"
-      N8N_WEBHOOK_HMAC_SECRET: "${N8N_WEBHOOK_HMAC_SECRET}"
+      N8N_WEBHOOK_HMAC_SECRET: "${N8N_WEBHOOK_HMAC_SECRET:-dev_n8n_webhook_secret}"
+      BACKEND_INTERNAL_URL: "${BACKEND_INTERNAL_URL:-http://host.docker.internal:8000}"
+      BACKEND_INTERNAL_SECRET: "${BACKEND_INTERNAL_SECRET:-dev_backend_internal_secret}"
 
       # -- User management ------------------------------------------------------
       N8N_USER_MANAGEMENT_DISABLED: "false"
@@ -152,6 +154,8 @@ services:
         condition: service_healthy
     ports:
       - "127.0.0.1:5678:5678"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - n8n_data:/home/node/.n8n
     networks:
@@ -201,7 +205,9 @@ services:
       # -- Code node sandbox (identical to n8n-main) ----------------------------
       NODE_FUNCTION_ALLOW_BUILTIN: "crypto,buffer"
       N8N_BLOCK_ENV_ACCESS_IN_NODE: "false"
-      N8N_WEBHOOK_HMAC_SECRET: "${N8N_WEBHOOK_HMAC_SECRET}"
+      N8N_WEBHOOK_HMAC_SECRET: "${N8N_WEBHOOK_HMAC_SECRET:-dev_n8n_webhook_secret}"
+      BACKEND_INTERNAL_URL: "${BACKEND_INTERNAL_URL:-http://host.docker.internal:8000}"
+      BACKEND_INTERNAL_SECRET: "${BACKEND_INTERNAL_SECRET:-dev_backend_internal_secret}"
 
       # -- Worker settings ------------------------------------------------------
       QUEUE_WORKER_TIMEOUT: 300
@@ -221,6 +227,8 @@ services:
     depends_on:
       n8n-main:
         condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - n8n_data:/home/node/.n8n
     networks:

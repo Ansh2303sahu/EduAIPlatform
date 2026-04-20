@@ -6,8 +6,6 @@ import { useParams } from "next/navigation";
 import {
   AlertTriangle,
   ArrowLeft,
-  CheckCircle2,
-  Clock3,
   FileText,
   ImageIcon,
   Info,
@@ -19,6 +17,8 @@ import {
 import { backendUrl } from "@/lib/backendUrl";
 import { fetchWithAuth } from "@/lib/fetchWithAuth";
 import { buildRenderableRagMeta } from "@/lib/ragMeta";
+import { extractReportSummary } from "@/lib/reportSummary";
+import AICheckPanel from "@/components/ai/AICheckPanel";
 import RagEvidencePanel from "@/components/rag/RagEvidencePanel";
 
 type ResultsResp = {
@@ -81,8 +81,10 @@ type ReportPlanItem =
       text?: string;
       why?: string;
       reason?: string;
+      rationale?: string;
       how?: string;
       details?: string;
+      steps?: string[];
       priority?: number;
     };
 
@@ -98,6 +100,51 @@ type ReportChecklistItem =
       complete?: boolean;
     };
 
+type ReportLearningMilestone =
+  | string
+  | {
+      title?: string;
+      objective?: string;
+      activities?: string[];
+    };
+
+type ReportLearningPath = {
+  recommended_practice?: ReportChecklistItem[];
+  milestones?: ReportLearningMilestone[];
+};
+
+type ReportSectionFeedback =
+  | string
+  | {
+      section_name?: string;
+      section?: string;
+      title?: string;
+      name?: string;
+      what_works?: string;
+      strengths?: string;
+      positives?: string;
+      what_needs_improvement?: string;
+      needs_improvement?: string;
+      concern?: string;
+      recommended_fix?: string;
+      how_to_improve?: string;
+      action?: string;
+    };
+
+type ReportPriorityIssue =
+  | string
+  | {
+      title?: string;
+      issue?: string;
+      what_is_weak?: string;
+      why_it_matters?: string;
+      reason?: string;
+      how_to_fix_it?: string;
+      recommended_fix?: string;
+      details?: string;
+      description?: string;
+    };
+
 type Phase7LatestResp = {
   found: boolean;
   item?: {
@@ -108,10 +155,20 @@ type Phase7LatestResp = {
     needs_review?: boolean;
     report_json?: {
       summary?: string;
+      overall_judgment?: string;
       issues?: ReportIssue[];
+      strengths?: ReportIssue[];
+      weaknesses?: ReportIssue[];
+      section_feedback?: ReportSectionFeedback[];
+      priority_issue?: ReportPriorityIssue;
       improvement_plan?: ReportPlanItem[];
+      suggestions?: ReportPlanItem[];
       checklist?: ReportChecklistItem[];
-      confidence?: { mode?: string; overall?: number };
+      learning_path?: ReportLearningPath;
+      confidence_explanation?: string;
+      evidence_coverage?: string;
+      grounding_summary?: string;
+      confidence?: { mode?: string; overall?: number; score?: number };
       model_agreement?: { ml_confidence?: number; llm_confidence?: number; final_confidence?: number };
       safety?: { needs_review?: boolean; reason?: string };
       rag_meta?: {
@@ -210,10 +267,35 @@ type LangChainMeta = {
   discrepancy_flag?: boolean | null;
 };
 
+type GenAIMeta = {
+  final_status?: string;
+  model_version?: string;
+  validator_model_version?: string;
+  summary?: string;
+};
+
 type NormalizedIssue = {
   title: string;
   evidence?: string;
   severity?: string;
+};
+
+type NormalizedStrength = {
+  title: string;
+  detail?: string;
+};
+
+type NormalizedSectionFeedback = {
+  sectionName: string;
+  whatWorks?: string;
+  whatNeedsImprovement?: string;
+  recommendedFix?: string;
+};
+
+type NormalizedPriorityIssue = {
+  title: string;
+  whyItMatters?: string;
+  howToFixIt?: string;
 };
 
 type NormalizedPlanItem = {
@@ -349,8 +431,117 @@ function normalizeIssues(items?: ReportIssue[] | null): NormalizedIssue[] {
     .filter(Boolean) as NormalizedIssue[];
 }
 
-function normalizeImprovementPlan(items?: ReportPlanItem[] | null): NormalizedPlanItem[] {
+function normalizeStrengths(items?: ReportIssue[] | null): NormalizedStrength[] {
+  return (items || [])
+    .map((item) => {
+      if (typeof item === "string") {
+        const title = item.trim();
+        return title ? { title } : null;
+      }
+      if (!item || typeof item !== "object") return null;
+
+      const title = firstNonEmptyText(item.title, item.label, item.text, item.issue);
+      const detail = firstNonEmptyText(item.evidence, item.details, item.description);
+
+      if (!title && !detail) return null;
+
+      return {
+        title: title || "Key strength",
+        detail,
+      };
+    })
+    .filter(Boolean) as NormalizedStrength[];
+}
+
+function normalizeSectionFeedback(items?: unknown): NormalizedSectionFeedback[] {
   return asArray(items)
+    .map((item, idx) => {
+      if (typeof item === "string") {
+        const text = item.trim();
+        return text
+          ? {
+              sectionName: `Section ${idx + 1}`,
+              whatNeedsImprovement: text,
+            }
+          : null;
+      }
+
+      const record = asRecord(item);
+      if (!record) return null;
+
+      const sectionName =
+        firstNonEmptyText(record.section_name, record.section, record.title, record.name) ||
+        `Section ${idx + 1}`;
+      const whatWorks = firstNonEmptyText(record.what_works, record.strengths, record.positives);
+      const whatNeedsImprovement = firstNonEmptyText(
+        record.what_needs_improvement,
+        record.needs_improvement,
+        record.concern,
+      );
+      const recommendedFix = firstNonEmptyText(
+        record.recommended_fix,
+        record.how_to_improve,
+        record.action,
+      );
+
+      return whatWorks || whatNeedsImprovement || recommendedFix
+        ? {
+            sectionName,
+            whatWorks,
+            whatNeedsImprovement,
+            recommendedFix,
+          }
+        : null;
+    })
+    .filter(Boolean) as NormalizedSectionFeedback[];
+}
+
+function normalizePriorityIssue(item?: unknown): NormalizedPriorityIssue | null {
+  if (typeof item === "string") {
+    const title = item.trim();
+    return title ? { title } : null;
+  }
+
+  const record = asRecord(item);
+  if (!record) return null;
+
+  const title = firstNonEmptyText(record.title, record.issue, record.what_is_weak);
+  const whyItMatters = firstNonEmptyText(record.why_it_matters, record.reason, record.details);
+  const howToFixIt = firstNonEmptyText(
+    record.how_to_fix_it,
+    record.recommended_fix,
+    record.description,
+  );
+
+  return title || whyItMatters || howToFixIt
+    ? {
+        title: title || "Priority issue",
+        whyItMatters,
+        howToFixIt,
+      }
+    : null;
+}
+
+function improvementPlanCandidates(items?: unknown): unknown[] {
+  const candidates: unknown[] = [];
+
+  for (const item of asArray(items)) {
+    const record = asRecord(item);
+    if (record) {
+      const actions = asArray(record.actions);
+      if (actions.length > 0) {
+        candidates.push(...actions);
+        continue;
+      }
+    }
+    candidates.push(item);
+  }
+
+  return candidates;
+}
+
+function normalizeImprovementPlan(items?: unknown): NormalizedPlanItem[] {
+  return improvementPlanCandidates(items)
     .map((item, idx) => {
       if (typeof item === "string") {
         const action = item.trim();
@@ -367,8 +558,13 @@ function normalizeImprovementPlan(items?: ReportPlanItem[] | null): NormalizedPl
         record.text,
         record.message,
       );
-      const why = firstNonEmptyText(record.why, record.reason, record.because);
-      const how = firstNonEmptyText(record.how, record.details, record.description);
+      const why = firstNonEmptyText(record.why, record.reason, record.because, record.rationale);
+      const steps = asArray(record.steps)
+        .map((step) => extractText(step))
+        .filter(Boolean) as string[];
+      const how =
+        firstNonEmptyText(record.how, record.details, record.description, record.rationale) ||
+        (steps.length > 0 ? steps.join("; ") : undefined);
       const priority = normalizePriority(record.priority) ?? idx + 1;
 
       return action || why || how
@@ -378,8 +574,48 @@ function normalizeImprovementPlan(items?: ReportPlanItem[] | null): NormalizedPl
     .filter(Boolean) as NormalizedPlanItem[];
 }
 
-function normalizeChecklist(items?: ReportChecklistItem[] | null): NormalizedChecklistItem[] {
-  return asArray(items)
+function checklistCandidates(
+  items?: unknown,
+  learningPath?: unknown,
+  fallbackItems?: unknown
+): unknown[] {
+  const explicit = asArray(items);
+  if (explicit.length > 0) return explicit;
+
+  const learning = asRecord(learningPath);
+  const generated: unknown[] = [];
+
+  if (learning) {
+    generated.push(...asArray(learning.recommended_practice));
+
+    for (const milestone of asArray(learning.milestones)) {
+      const record = asRecord(milestone);
+      if (!record) {
+        generated.push(milestone);
+        continue;
+      }
+
+      if (record.title || record.objective) {
+        generated.push({
+          item: firstNonEmptyText(record.title, record.objective),
+          done: false,
+        });
+      }
+
+      generated.push(...asArray(record.activities));
+    }
+  }
+
+  if (generated.length > 0) return generated;
+  return asArray(fallbackItems);
+}
+
+function normalizeChecklist(
+  items?: unknown,
+  learningPath?: unknown,
+  fallbackItems?: unknown
+): NormalizedChecklistItem[] {
+  return checklistCandidates(items, learningPath, fallbackItems)
     .map((item) => {
       if (typeof item === "string") {
         const text = item.trim();
@@ -583,7 +819,10 @@ export default function ResultsPage() {
   const [loading, setLoading] = useState(true);
   const [reanalyzing, setReanalyzing] = useState(false);
   const [langchainGenerating, setLangchainGenerating] = useState(false);
+  const [genaiGenerating, setGenaiGenerating] = useState(false);
   const [langchainMeta, setLangchainMeta] = useState<LangChainMeta | null>(null);
+  const [genaiMeta, setGenaiMeta] = useState<GenAIMeta | null>(null);
+  const [aiCheckRefreshKey, setAiCheckRefreshKey] = useState(0);
 
   const inflightRef = useRef(false);
 
@@ -628,7 +867,7 @@ export default function ResultsPage() {
     try {
       // 10-minute timeout — LLM generation can take several minutes
       const res = await fetchWithAuth(
-        backendUrl(`/phase7/student/generate`),
+        backendUrl(`/ai/generate/student-report`),
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -646,6 +885,7 @@ export default function ResultsPage() {
       } else {
         await loadAll();
       }
+      setAiCheckRefreshKey((value) => value + 1);
     } catch (e: any) {
       setError(e?.message || "Re-analyze failed");
     } finally {
@@ -684,10 +924,45 @@ export default function ResultsPage() {
           report_json: json.report,
         },
       });
+      setAiCheckRefreshKey((value) => value + 1);
     } catch (e: any) {
       setError(e?.message || "LangChain generate failed");
     } finally {
       setLangchainGenerating(false);
+    }
+  }
+
+  async function generateGenAI() {
+    if (!fileId || genaiGenerating) return;
+    setGenaiGenerating(true);
+    setError(null);
+    try {
+      const res = await fetchWithAuth(
+        backendUrl(`/ai/generate/student-report`),
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ file_id: fileId }),
+        },
+        { timeoutMs: 600000 }
+      );
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        throw new Error(txt || `GenAI generate failed (${res.status})`);
+      }
+      const json = await res.json();
+      setGenaiMeta({
+        final_status: json?.audit?.final_status,
+        model_version: json?.audit?.model_version,
+        validator_model_version: json?.audit?.validator_model_version,
+        summary: json?.prediction?.report?.summary,
+      });
+      await loadAll();
+      setAiCheckRefreshKey((value) => value + 1);
+    } catch (e: any) {
+      setError(e?.message || "GenAI generate failed");
+    } finally {
+      setGenaiGenerating(false);
     }
   }
 
@@ -745,19 +1020,28 @@ export default function ResultsPage() {
   const isDegradedReport = isLowContentQuality || needsReview;
   const reportStatusLabel = isDegradedReport ? "Degraded" : "Valid";
   const reportQualityBannerText = isDegradedReport
-    ? "⚠️ Low-confidence AI report — review recommended"
-    : "✅ AI-generated report (validated)";
+    ? "Review this feedback carefully before using it for revision planning."
+    : "This feedback is ready to support your next revision.";
   const reportModelUsed =
     latest?.item?.model_versions?.llm_model_used ||
     latest?.item?.model_versions?.llm_primary;
+  const configuredPrimaryModel = latest?.item?.model_versions?.llm_primary;
+  const configuredFallbackModel = latest?.item?.model_versions?.llm_fallback;
   const reportFallbackModel =
     latest?.item?.model_versions?.llm_fallback &&
     latest.item.model_versions.llm_fallback !== reportModelUsed
       ? latest.item.model_versions.llm_fallback
       : undefined;
+  const modelRouteLabel = configuredPrimaryModel
+    ? configuredFallbackModel && configuredFallbackModel !== configuredPrimaryModel
+      ? `${configuredPrimaryModel} -> ${configuredFallbackModel}`
+      : configuredPrimaryModel
+    : undefined;
   const reportConfidenceOverall =
     typeof report?.confidence?.overall === "number"
       ? report.confidence.overall
+      : typeof report?.confidence?.score === "number"
+      ? report.confidence.score
       : finalConf;
   const selectionMeta = latest?.selection_metadata;
   const preferredNonDegraded = !!selectionMeta?.preferred_non_degraded;
@@ -766,23 +1050,57 @@ export default function ResultsPage() {
       ? selectionMeta.total_reports_considered
       : undefined;
   const normalizedReport = useMemo(() => {
-    const safeReport = report || {};
+    const safeReport = asRecord(report) || {};
 
-    const issues = normalizeIssues(safeReport.issues);
-    const improvementPlan = normalizeImprovementPlan(safeReport.improvement_plan);
-    const checklist = normalizeChecklist(safeReport.checklist);
+    const issues = normalizeIssues(
+      (safeReport.issues as ReportIssue[] | undefined) ??
+        (safeReport.weaknesses as ReportIssue[] | undefined)
+    );
+    const strengths = normalizeStrengths(safeReport.strengths as ReportIssue[] | undefined);
+    const sectionFeedback = normalizeSectionFeedback(safeReport.section_feedback);
+    const priorityIssue =
+      normalizePriorityIssue(safeReport.priority_issue) ??
+      (issues[0]
+        ? {
+            title: issues[0].title,
+            whyItMatters: issues[0].evidence,
+          }
+        : null);
+    const improvementPlan = normalizeImprovementPlan(
+      safeReport.improvement_plan ?? safeReport.suggestions
+    );
+    const checklist = normalizeChecklist(
+      safeReport.checklist,
+      safeReport.learning_path,
+      improvementPlan.map((item) => item.action)
+    );
 
     return {
       summary:
-        typeof safeReport.summary === "string" && safeReport.summary.trim()
-          ? safeReport.summary.trim()
-          : "No summary available.",
+        extractReportSummary("student", safeReport) ||
+        firstNonEmptyText(safeReport.summary, safeReport.overview) ||
+        "No summary available.",
+      overallJudgment: firstNonEmptyText(
+        safeReport.overall_judgment,
+        safeReport.summary,
+        safeReport.overview,
+      ),
       issues,
+      strengths,
+      sectionFeedback,
+      priorityIssue,
       improvementPlan,
       checklist,
+      confidenceExplanation: firstNonEmptyText(safeReport.confidence_explanation),
+      groundingSummary: firstNonEmptyText(
+        safeReport.evidence_coverage,
+        safeReport.grounding_summary,
+      ),
     };
   }, [report]);
   const issueItems = normalizedReport.issues;
+  const strengthItems = normalizedReport.strengths;
+  const sectionFeedbackItems = normalizedReport.sectionFeedback;
   const improvementItems = normalizedReport.improvementPlan;
   const checklistItems = normalizedReport.checklist;
   const hasRenderableReport =
@@ -790,9 +1108,15 @@ export default function ResultsPage() {
     Object.keys(report).length > 0 &&
     (
       !!normalizedReport.summary ||
+      !!normalizedReport.overallJudgment ||
+      strengthItems.length > 0 ||
       normalizedReport.issues.length > 0 ||
+      sectionFeedbackItems.length > 0 ||
+      !!normalizedReport.priorityIssue ||
       normalizedReport.improvementPlan.length > 0 ||
-      normalizedReport.checklist.length > 0
+      normalizedReport.checklist.length > 0 ||
+      !!normalizedReport.confidenceExplanation ||
+      !!normalizedReport.groundingSummary
     );
 
   const ragMeta = useMemo(() => buildRenderableRagMeta(latest?.item), [latest?.item]);
@@ -874,6 +1198,14 @@ export default function ResultsPage() {
                   <RefreshCw size={16} className={langchainGenerating ? "animate-spin" : ""} />
                   {langchainGenerating ? "Generating..." : "LangChain"}
                 </button>
+                <button
+                  onClick={() => void generateGenAI()}
+                  disabled={genaiGenerating}
+                  className="inline-flex items-center gap-2 rounded-2xl border border-emerald-400/30 bg-emerald-500/20 px-4 py-3 text-sm font-bold text-emerald-100 transition hover:bg-emerald-500/30 disabled:opacity-50"
+                >
+                  <RefreshCw size={16} className={genaiGenerating ? "animate-spin" : ""} />
+                  {genaiGenerating ? "Generating..." : "GenAI"}
+                </button>
               </div>
             </div>
           </div>
@@ -882,6 +1214,21 @@ export default function ResultsPage() {
             <div className="rounded-[24px] border border-rose-300/20 bg-rose-400/10 px-4 py-3 text-sm text-rose-200">
               {error}
             </div>
+          ) : null}
+
+          <AICheckPanel key={`${fileId}-${aiCheckRefreshKey}`} fileId={fileId} role="student" />
+
+          {genaiMeta ? (
+            <section className="rounded-[24px] border border-emerald-300/20 bg-emerald-400/10 px-4 py-3 text-sm text-emerald-100">
+              <div className="font-bold">Stored Phase 15/16 GenAI run is available.</div>
+              <div className="mt-1">
+                Status: {genaiMeta.final_status || "completed"} | Model: {genaiMeta.model_version || "â€”"} | Validator:{" "}
+                {genaiMeta.validator_model_version || "â€”"}
+              </div>
+              <div className="mt-1 text-emerald-50/90">
+                {genaiMeta.summary || "Refresh AI Check to inspect LangGraph, GenAI, MCP, LLM, and ML metadata for this file."}
+              </div>
+            </section>
           ) : null}
 
           <div className="grid gap-6 xl:grid-cols-[1.2fr_0.8fr]">
@@ -978,27 +1325,133 @@ export default function ResultsPage() {
                     </div>
                   </ContentCard>
 
-                  <ContentCard title="Issues">
-                    {issueItems.length === 0 ? (
-                      <MutedText text="No issues listed." />
-                    ) : (
-                      <div className="grid gap-3">
-                        {issueItems.map((it, idx) => (
-                          <div key={idx} className="rounded-[22px] border border-white/10 bg-white/[0.04] p-4">
-                            <div className="flex flex-wrap items-center justify-between gap-3">
-                              <strong className="text-white">{it.title}</strong>
-                              <span className="rounded-full border border-white/10 bg-white/8 px-3 py-1 text-xs text-slate-300">
-                                Severity: {it.severity || "—"}
-                              </span>
+                  {(normalizedReport.overallJudgment || normalizedReport.priorityIssue) ? (
+                    <div className="grid gap-5 xl:grid-cols-2">
+                      {normalizedReport.overallJudgment ? (
+                        <ContentCard title="Overall judgment">
+                          <div className="whitespace-pre-wrap text-sm leading-7 text-slate-300">
+                            {normalizedReport.overallJudgment}
+                          </div>
+                        </ContentCard>
+                      ) : null}
+
+                      {normalizedReport.priorityIssue ? (
+                        <ContentCard title="Top priority fix">
+                          <div className="grid gap-3 text-sm text-slate-300">
+                            <div className="text-base font-bold text-white">
+                              {normalizedReport.priorityIssue.title}
                             </div>
-                            {it.evidence ? (
-                              <div className="mt-2 text-sm leading-6 text-slate-300">{it.evidence}</div>
+                            {normalizedReport.priorityIssue.whyItMatters ? (
+                              <div>
+                                <span className="font-semibold text-slate-200">Why it matters:</span>{" "}
+                                {normalizedReport.priorityIssue.whyItMatters}
+                              </div>
                             ) : null}
+                            {normalizedReport.priorityIssue.howToFixIt ? (
+                              <div>
+                                <span className="font-semibold text-slate-200">How to fix it:</span>{" "}
+                                {normalizedReport.priorityIssue.howToFixIt}
+                              </div>
+                            ) : null}
+                          </div>
+                        </ContentCard>
+                      ) : null}
+                    </div>
+                  ) : null}
+
+                  {(strengthItems.length > 0 || issueItems.length > 0) ? (
+                    <div className="grid gap-5 xl:grid-cols-2">
+                      <ContentCard title="Strengths">
+                        {strengthItems.length === 0 ? (
+                          <MutedText text="No strengths listed." />
+                        ) : (
+                          <div className="grid gap-3">
+                            {strengthItems.map((it, idx) => (
+                              <div
+                                key={idx}
+                                className="rounded-[22px] border border-white/10 bg-white/[0.04] p-4"
+                              >
+                                <div className="font-bold text-white">{it.title}</div>
+                                {it.detail ? (
+                                  <div className="mt-2 text-sm leading-6 text-slate-300">
+                                    {it.detail}
+                                  </div>
+                                ) : null}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </ContentCard>
+
+                      <ContentCard title="Weaknesses and issues">
+                        {issueItems.length === 0 ? (
+                          <MutedText text="No weaknesses listed." />
+                        ) : (
+                          <div className="grid gap-3">
+                            {issueItems.map((it, idx) => (
+                              <div
+                                key={idx}
+                                className="rounded-[22px] border border-white/10 bg-white/[0.04] p-4"
+                              >
+                                <div className="flex flex-wrap items-center justify-between gap-3">
+                                  <strong className="text-white">{it.title}</strong>
+                                  <span className="rounded-full border border-white/10 bg-white/8 px-3 py-1 text-xs text-slate-300">
+                                    Severity: {it.severity || "—"}
+                                  </span>
+                                </div>
+                                {it.evidence ? (
+                                  <div className="mt-2 text-sm leading-6 text-slate-300">
+                                    {it.evidence}
+                                  </div>
+                                ) : null}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </ContentCard>
+                    </div>
+                  ) : null}
+
+                  {sectionFeedbackItems.length > 0 ? (
+                    <ContentCard title="Section-by-section feedback">
+                      <div className="grid gap-4">
+                        {sectionFeedbackItems.map((item, idx) => (
+                          <div
+                            key={`${item.sectionName}-${idx}`}
+                            className="rounded-[22px] border border-white/10 bg-white/[0.04] p-4"
+                          >
+                            <div className="text-base font-bold text-white">{item.sectionName}</div>
+                            <div className="mt-3 grid gap-3 md:grid-cols-3">
+                              <div>
+                                <div className="text-xs font-extrabold uppercase tracking-[0.16em] text-slate-400">
+                                  What works
+                                </div>
+                                <div className="mt-2 text-sm leading-6 text-slate-300">
+                                  {item.whatWorks || "Not specified."}
+                                </div>
+                              </div>
+                              <div>
+                                <div className="text-xs font-extrabold uppercase tracking-[0.16em] text-slate-400">
+                                  What needs improvement
+                                </div>
+                                <div className="mt-2 text-sm leading-6 text-slate-300">
+                                  {item.whatNeedsImprovement || "Not specified."}
+                                </div>
+                              </div>
+                              <div>
+                                <div className="text-xs font-extrabold uppercase tracking-[0.16em] text-slate-400">
+                                  Recommended fix
+                                </div>
+                                <div className="mt-2 text-sm leading-6 text-slate-300">
+                                  {item.recommendedFix || "Not specified."}
+                                </div>
+                              </div>
+                            </div>
                           </div>
                         ))}
                       </div>
-                    )}
-                  </ContentCard>
+                    </ContentCard>
+                  ) : null}
 
                   <ContentCard title="Improvement plan">
                     {improvementItems.length === 0 ? (
@@ -1021,23 +1474,57 @@ export default function ResultsPage() {
                     )}
                   </ContentCard>
 
-                  <ContentCard title="Checklist">
-                    {checklistItems.length === 0 ? (
-                      <MutedText text="No checklist items." />
-                    ) : (
-                      <div className="grid gap-3">
-                        {checklistItems.map((c, idx) => (
-                          <label
-                            key={idx}
-                            className="flex items-center gap-3 rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-3 text-sm text-slate-300"
-                          >
-                            <input type="checkbox" checked={!!c.done} readOnly className="h-4 w-4 accent-blue-500" />
-                            <span>{c.item}</span>
-                          </label>
-                        ))}
-                      </div>
-                    )}
-                  </ContentCard>
+                  <div className="grid gap-5 xl:grid-cols-2">
+                    <ContentCard title="Checklist">
+                      {checklistItems.length === 0 ? (
+                        <MutedText text="No checklist items." />
+                      ) : (
+                        <div className="grid gap-3">
+                          {checklistItems.map((c, idx) => (
+                            <label
+                              key={idx}
+                              className="flex items-center gap-3 rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-3 text-sm text-slate-300"
+                            >
+                              <input
+                                type="checkbox"
+                                checked={!!c.done}
+                                readOnly
+                                className="h-4 w-4 accent-blue-500"
+                              />
+                              <span>{c.item}</span>
+                            </label>
+                          ))}
+                        </div>
+                      )}
+                    </ContentCard>
+
+                    {(normalizedReport.confidenceExplanation || normalizedReport.groundingSummary) ? (
+                      <ContentCard title="Confidence and evidence">
+                        <div className="grid gap-4 text-sm leading-7 text-slate-300">
+                          {normalizedReport.confidenceExplanation ? (
+                            <div>
+                              <div className="text-xs font-extrabold uppercase tracking-[0.16em] text-slate-400">
+                                Confidence note
+                              </div>
+                              <div className="mt-2 whitespace-pre-wrap">
+                                {normalizedReport.confidenceExplanation}
+                              </div>
+                            </div>
+                          ) : null}
+                          {normalizedReport.groundingSummary ? (
+                            <div>
+                              <div className="text-xs font-extrabold uppercase tracking-[0.16em] text-slate-400">
+                                Evidence coverage
+                              </div>
+                              <div className="mt-2 whitespace-pre-wrap">
+                                {normalizedReport.groundingSummary}
+                              </div>
+                            </div>
+                          ) : null}
+                        </div>
+                      </ContentCard>
+                    ) : null}
+                  </div>
 
                   <RagEvidencePanel
                     ragMeta={ragMeta}
@@ -1078,6 +1565,12 @@ export default function ResultsPage() {
                       ) : null}
                     </div>
                   )}
+
+                  {modelRouteLabel ? (
+                    <div>
+                      Model route: <b className="text-white">{modelRouteLabel}</b>
+                    </div>
+                  ) : null}
 
                   <div>
                     Timings: total <b className="text-white">{msToSec(latest?.item?.model_versions?.timings_ms?.total)}</b>, ingestion{" "}

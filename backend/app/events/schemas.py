@@ -47,6 +47,8 @@ class FileUploadPayload(BaseModel):
 
 
 class LowConfidencePayload(BaseModel):
+    model_config = {"protected_namespaces": ()}
+
     file_id: str
     user_id: str
     role: str

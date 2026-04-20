@@ -42,9 +42,9 @@ async def run(state: Phase12GraphState) -> Phase12GraphState:
     execution_mode = execution_mode_from_pipeline_mode(mode)
     state.pipeline_context.mode = mode
     state.pipeline_context.execution_mode = execution_mode
-    state.pipeline_context.execution_meta.execution_mode = execution_mode.value
+    state.pipeline_context.execution_meta.execution_mode = execution_mode
     state.pipeline_context.execution_meta.decision_source = (
-        DecisionSource.ML.value if restricted else DecisionSource.HYBRID.value
+        DecisionSource.ML if restricted else DecisionSource.HYBRID
     )
     record_event(
         state,

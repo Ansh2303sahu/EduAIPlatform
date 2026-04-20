@@ -13,6 +13,7 @@ from typing import Any
 import httpx
 
 from app.core.config import settings
+from app.services.uuid_normalization import normalize_uuid_insert_payload
 
 
 def _require_supabase_config() -> None:
@@ -62,9 +63,10 @@ class WorkflowHistoryRepo:
     steps_table = "mcp_workflow_steps"
 
     async def insert_run(self, row: dict[str, Any]) -> dict[str, Any]:
+        safe_row = normalize_uuid_insert_payload(row)
         url = f"{_base_url()}/rest/v1/{self.runs_table}"
         async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.post(url, headers=_headers(prefer_return=True), json=row)
+            resp = await client.post(url, headers=_headers(prefer_return=True), json=safe_row)
         if resp.status_code >= 300:
             raise RuntimeError(
                 f"{self.runs_table} insert failed: {resp.status_code} {resp.text}"
@@ -75,9 +77,10 @@ class WorkflowHistoryRepo:
     async def insert_steps(self, rows: list[dict[str, Any]]) -> None:
         if not rows:
             return
+        safe_rows = [normalize_uuid_insert_payload(row) for row in rows]
         url = f"{_base_url()}/rest/v1/{self.steps_table}"
         async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.post(url, headers=_headers(prefer_return=False), json=rows)
+            resp = await client.post(url, headers=_headers(prefer_return=False), json=safe_rows)
         if resp.status_code >= 300:
             raise RuntimeError(
                 f"{self.steps_table} bulk insert failed: {resp.status_code} {resp.text}"

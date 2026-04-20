@@ -42,6 +42,25 @@ MAX_VIDEO_BYTES = int(os.getenv("MAX_VIDEO_BYTES", "50000000"))  # 50MB
 WORKER_MODE = os.getenv("WORKER_MODE", "all").lower().strip()
 
 
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+HTTP_TIMEOUT = httpx.Timeout(
+    connect=_env_float("INGESTION_HTTP_CONNECT_TIMEOUT_SECONDS", 30.0),
+    read=_env_float("INGESTION_HTTP_READ_TIMEOUT_SECONDS", 120.0),
+    write=_env_float("INGESTION_HTTP_WRITE_TIMEOUT_SECONDS", 120.0),
+    pool=_env_float("INGESTION_HTTP_POOL_TIMEOUT_SECONDS", 30.0),
+)
+CLAIM_ERROR_SLEEP_SECONDS = _env_float("INGESTION_CLAIM_ERROR_SLEEP_SECONDS", 10.0)
+
+
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -189,7 +208,6 @@ async def run_loop() -> None:
     if not settings.signed_url_expires_seconds:
         raise RuntimeError("SIGNED_URL_EXPIRES_SECONDS is not configured")
 
-    repo = IngestionRepo(service_role_key=settings.supabase_service_role_key)
     files_repo = FilesRepo()
 
     events_repo = ProcessingEventsRepo()
@@ -201,13 +219,20 @@ async def run_loop() -> None:
     parser_base = _parser_base()
     parser_secret = settings.parser_secret
 
-    async with httpx.AsyncClient(timeout=120) as client:
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+        repo = IngestionRepo(service_role_key=settings.supabase_service_role_key, client=client)
+
         while True:
-            job = await repo.claim_next_job(
-                worker_id=WORKER_ID,
-                max_attempts=MAX_ATTEMPTS,
-                lock_timeout_seconds=LOCK_TIMEOUT_SECONDS,
-            )
+            try:
+                job = await repo.claim_next_job(
+                    worker_id=WORKER_ID,
+                    max_attempts=MAX_ATTEMPTS,
+                    lock_timeout_seconds=LOCK_TIMEOUT_SECONDS,
+                )
+            except Exception as e:
+                print(f"[ingestion-worker] claim_next_job failed: {type(e).__name__}: {e}")
+                await asyncio.sleep(CLAIM_ERROR_SLEEP_SECONDS)
+                continue
 
             if not job:
                 await asyncio.sleep(POLL_SECONDS)
@@ -475,8 +500,14 @@ async def run_loop() -> None:
                 await repo.mark_done(job_id=job_id, worker_id=WORKER_ID, details={"job_type": job_type, "mime_type": mime_type})
 
             except httpx.HTTPError as e:
-                await repo.mark_failed(job_id=job_id, worker_id=WORKER_ID, error_code="HTTP_ERROR", error_message=str(e))
+                try:
+                    await repo.mark_failed(job_id=job_id, worker_id=WORKER_ID, error_code="HTTP_ERROR", error_message=str(e))
+                except Exception as mark_error:
+                    print(f"[ingestion-worker] mark_failed also failed job_id={job_id}: {type(mark_error).__name__}: {mark_error}")
             except Exception as e:
-                await repo.mark_failed(job_id=job_id, worker_id=WORKER_ID, error_code="WORKER_ERROR", error_message=str(e))
+                try:
+                    await repo.mark_failed(job_id=job_id, worker_id=WORKER_ID, error_code="WORKER_ERROR", error_message=str(e))
+                except Exception as mark_error:
+                    print(f"[ingestion-worker] mark_failed also failed job_id={job_id}: {type(mark_error).__name__}: {mark_error}")
             finally:
                 await asyncio.sleep(POLL_SECONDS)

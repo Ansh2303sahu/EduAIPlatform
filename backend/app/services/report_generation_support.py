@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import time
 from typing import Any, Dict, Literal
 
@@ -12,6 +13,14 @@ from pydantic import BaseModel, Field, ValidationError
 
 from app.core.config import settings
 from app.core.deps import CurrentUser
+from app.langchain.parsers.normalizer import (
+    normalize_professor_payload as _phase10_normalize_professor_payload,
+    normalize_student_payload as _phase10_normalize_student_payload,
+)
+from app.services.uuid_normalization import (
+    normalize_uuid_insert_payload as _normalize_uuid_insert_payload,
+    uuid_or_none as _uuid_or_none,
+)
 
 Severity = Literal["low", "med", "high"]
 
@@ -147,6 +156,67 @@ _PROJECT_HINT_TERMS = {
     "testing",
 }
 
+_TECHNICAL_EXERCISE_HINT_TERMS = {
+    "winforms",
+    "system.drawing",
+    "c#",
+    ".net",
+    "recursion",
+    "recursive",
+    "midpoint",
+    "computer graphics",
+    "graphics",
+    "geometric subdivision",
+    "coordinate alignment",
+}
+
+_ACADEMIC_HEADING_TERMS = {
+    "introduction",
+    "background and context",
+    "background",
+    "literature review",
+    "methodology",
+    "methods",
+    "discussion",
+    "analysis",
+    "conclusion",
+    "references",
+    "bibliography",
+}
+
+_CHAPTER_HEADING_TERMS = {
+    "chapter",
+    "background and context",
+    "literature review",
+    "research questions",
+    "methodology",
+    "discussion",
+    "conclusion",
+}
+
+_REPORT_HEADING_TERMS = {
+    "executive summary",
+    "findings",
+    "recommendations",
+    "limitations",
+    "results",
+    "report",
+}
+
+_CODE_LINE_RE = re.compile(
+    r"(?im)^\s*(?:```|def\s+\w+\(|class\s+\w+[\(:]|function\s+\w+\(|public\s+(?:class|static|void)|"
+    r"private\s+\w+|protected\s+\w+|import\s+\w|from\s+\w+\s+import|const\s+\w+\s*=|let\s+\w+\s*=|"
+    r"var\s+\w+\s*=|return\s+.+;|if\s*\(|for\s*\(|while\s*\(|SELECT\s+.+\s+FROM\s+.+)\s*$"
+)
+_CITATION_PATTERNS = (
+    re.compile(r"\([A-Z][A-Za-z'`-]+(?:\s+et al\.)?,\s*(?:19|20)\d{2}[a-z]?\)"),
+    re.compile(r"\[[0-9]{1,3}\]"),
+    re.compile(r"\bet al\.\b", re.IGNORECASE),
+    re.compile(r"\bdoi:\s*10\.\d{4,9}/[-._;()/:A-Z0-9]+\b", re.IGNORECASE),
+)
+_PROSE_SENTENCE_RE = re.compile(r"[A-Z][^.!?]{50,}[.!?]")
+_WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9'/-]{2,}")
+
 
 def _clean_base_url(value: str | None) -> str:
     raw = (value or "").strip()
@@ -245,7 +315,15 @@ async def get_rows(path: str) -> list[dict[str, Any]]:
 
 
 async def post_row(table: str, payload: dict[str, Any]) -> dict[str, Any]:
-    response = await _supabase_post(table, payload)
+    safe_payload = normalize_uuid_insert_payload(payload)
+    print(
+        "DEBUG UUID VALUES:",
+        safe_payload.get("file_id"),
+        safe_payload.get("report_id"),
+        safe_payload.get("user_id"),
+        safe_payload.get("submission_id"),
+    )
+    response = await _supabase_post(table, safe_payload)
     if response.status_code >= 400:
         raise HTTPException(
             status_code=400,
@@ -274,16 +352,132 @@ def sha256_json(obj: Any) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def detect_submission_kind(ingestion: dict[str, Any]) -> str:
-    haystack = " ".join(
-        [
-            str(ingestion.get("text_content") or ""),
-            str(ingestion.get("audio_transcript") or ""),
+def uuid_or_none(value: Any) -> str | None:
+    return _uuid_or_none(value)
+
+
+def normalize_uuid_insert_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return an insert payload with blank UUID-like fields converted to None."""
+
+    return _normalize_uuid_insert_payload(payload)
+
+
+def _submission_signal_text(ingestion: dict[str, Any]) -> str:
+    return "\n".join(
+        part
+        for part in (
+            str(ingestion.get("text_content") or "").strip(),
+            str(ingestion.get("ocr_text") or "").strip(),
+            str(ingestion.get("audio_transcript") or "").strip(),
             json.dumps(ingestion.get("tables_json") or {}, ensure_ascii=False),
+        )
+        if part
+    )
+
+
+def _heading_hits(lowered: str, headings: set[str]) -> int:
+    return sum(1 for heading in headings if heading in lowered)
+
+
+def _code_line_hits(text: str) -> int:
+    return len(_CODE_LINE_RE.findall(text[:16000]))
+
+
+def _citation_hits(text: str) -> int:
+    return sum(len(pattern.findall(text[:16000])) for pattern in _CITATION_PATTERNS)
+
+
+def _prose_signal_count(text: str) -> int:
+    compact = " ".join((text or "").split())
+    sentence_hits = len(_PROSE_SENTENCE_RE.findall(compact[:16000]))
+    paragraph_hits = len(
+        [
+            part
+            for part in re.split(r"\n\s*\n", text[:16000])
+            if len(_WORD_RE.findall(part)) >= 45
         ]
-    ).lower()
-    hits = sum(1 for term in _PROJECT_HINT_TERMS if term in haystack)
-    return "project" if hits >= 3 else "academic"
+    )
+    return sentence_hits + paragraph_hits
+
+
+def classify_submission_form(ingestion: dict[str, Any]) -> str:
+    """Classify the submission surface form for prompt/routing decisions.
+
+    The classifier intentionally prefers academic-writing modes whenever the
+    submission shows chapter/report headings, citations, and sustained prose,
+    even if the topic mentions architecture, testing, or implementation.
+    """
+
+    text = _submission_signal_text(ingestion)
+    if not text.strip():
+        haystack = text.lower()
+        hits = sum(1 for term in _PROJECT_HINT_TERMS if term in haystack)
+        return "code" if hits >= 3 else "essay"
+
+    lowered = text.lower()
+    project_term_hits = sum(1 for term in _PROJECT_HINT_TERMS if term in lowered)
+    technical_term_hits = sum(1 for term in _TECHNICAL_EXERCISE_HINT_TERMS if term in lowered)
+    academic_heading_hits = _heading_hits(lowered, _ACADEMIC_HEADING_TERMS)
+    chapter_heading_hits = _heading_hits(lowered, _CHAPTER_HEADING_TERMS)
+    report_heading_hits = _heading_hits(lowered, _REPORT_HEADING_TERMS)
+    citation_hits = _citation_hits(text)
+    prose_signal_hits = _prose_signal_count(text)
+    code_line_hits = _code_line_hits(text)
+    code_fence_hits = lowered.count("```")
+    code_symbol_hits = sum(1 for ch in text[:12000] if ch in "{}();[]=<>")
+    alpha_chars = sum(1 for ch in text[:12000] if ch.isalpha())
+    symbol_ratio = (code_symbol_hits / alpha_chars) if alpha_chars else 0.0
+
+    academic_score = (
+        academic_heading_hits * 2
+        + chapter_heading_hits * 2
+        + report_heading_hits
+        + min(citation_hits, 4) * 2
+        + min(prose_signal_hits, 4)
+    )
+    chapter_score = chapter_heading_hits * 2 + min(citation_hits, 3)
+    report_score = report_heading_hits * 2 + min(prose_signal_hits, 3)
+    code_score = (
+        min(project_term_hits, 5)
+        + min(technical_term_hits, 4) * 2
+        + code_line_hits * 2
+        + code_fence_hits * 2
+        + (2 if symbol_ratio >= 0.10 else 0)
+    )
+
+    if chapter_score >= 5 and academic_score >= code_score:
+        return "chapter"
+    if chapter_heading_hits >= 1 and academic_score >= 4 and code_score <= academic_score:
+        return "chapter"
+    if report_score >= 4 and academic_score + 1 >= code_score:
+        return "report"
+    if code_score >= 8 and academic_score <= 3:
+        return "code"
+    if code_score >= 6 and academic_score >= 6:
+        return "mixed"
+    if academic_score >= max(4, code_score):
+        return "essay"
+    if code_score >= academic_score + 3:
+        return "code"
+    if academic_heading_hits or citation_hits or prose_signal_hits >= 2:
+        return "essay"
+    return "code" if project_term_hits >= 3 else "essay"
+
+
+def detect_submission_kind(ingestion: dict[str, Any]) -> str:
+    submission_form = classify_submission_form(ingestion)
+    if submission_form == "code":
+        return "project"
+
+    if submission_form in {"mixed", "report"}:
+        lowered = _submission_signal_text(ingestion).lower()
+        technical_signal_hits = sum(1 for term in _PROJECT_HINT_TERMS if term in lowered) + sum(
+            1 for term in _TECHNICAL_EXERCISE_HINT_TERMS if term in lowered
+        )
+        if technical_signal_hits >= 4:
+            return "project"
+
+    return "academic"
 
 
 def _phase7_as_dict(value: Any) -> dict[str, Any]:
@@ -483,6 +677,7 @@ def _as_issue_object(item: Any) -> dict[str, Any] | None:
     title = str(
         item.get("title")
         or item.get("issue")
+        or item.get("weakness")
         or item.get("label")
         or item.get("text")
         or ""
@@ -557,18 +752,24 @@ def _as_improvement_object(item: Any, index: int) -> dict[str, Any] | None:
         or item.get("text")
         or ""
     ).strip()
-    why = str(item.get("why") or item.get("reason") or "").strip()
+    why = str(item.get("why") or item.get("reason") or item.get("rationale") or "").strip()
     how = str(item.get("how") or item.get("details") or "").strip()
-    priority = item.get("priority")
-    if not isinstance(priority, int):
-        priority = index + 1
+    if not how:
+        steps = [
+            str(step).strip()
+            for step in _phase7_as_list(item.get("steps"))
+            if str(step).strip()
+        ]
+        if steps:
+            how = "; ".join(steps)
+    priority = _student_priority_rank(item.get("priority"), index)
     if not action and not why and not how:
         return None
     return {
         "action": action or "Suggested improvement",
         "why": why or "The reason was not provided.",
         "how": how or "The implementation detail was not provided.",
-        "priority": _phase7_int(priority, default=index + 1),
+        "priority": priority,
     }
 
 
@@ -583,8 +784,10 @@ def _as_checklist_object(item: Any) -> dict[str, Any] | None:
 
     text = str(
         item.get("item")
+        or item.get("action")
         or item.get("label")
         or item.get("title")
+        or item.get("objective")
         or item.get("text")
         or ""
     ).strip()
@@ -602,6 +805,82 @@ def _normalize_confidence_mode(value: Any, *, restricted: bool) -> str:
     return "restricted" if str(value or "").strip().lower() == "restricted" else "normal"
 
 
+def _student_priority_rank(value: Any, index: int) -> int:
+    if isinstance(value, str):
+        mapped = {
+            "high": 1,
+            "medium": 2,
+            "med": 2,
+            "low": 3,
+        }.get(value.strip().lower())
+        if mapped is not None:
+            return mapped
+    return _phase7_int(value, default=index + 1)
+
+
+def _student_improvement_source(data: dict[str, Any]) -> list[Any]:
+    improvement_plan = _phase7_as_dict(data.get("improvement_plan"))
+    actions = _phase7_as_list(improvement_plan.get("actions"))
+    if actions:
+        return actions
+
+    for key in ("improvement_plan", "suggestions", "recommendations", "next_steps"):
+        if key == "improvement_plan" and isinstance(data.get(key), dict):
+            continue
+        items = _phase7_as_list(data.get(key))
+        if items:
+            return items
+
+    return []
+
+
+def _student_checklist_source(data: dict[str, Any]) -> list[Any]:
+    checklist = _phase7_as_list(data.get("checklist"))
+    if checklist:
+        return checklist
+
+    learning_path = _phase7_as_dict(data.get("learning_path"))
+    generated: list[Any] = []
+
+    for item in _phase7_as_list(learning_path.get("recommended_practice")):
+        if str(item or "").strip():
+            generated.append(item)
+
+    for milestone in _phase7_as_list(learning_path.get("milestones")):
+        if isinstance(milestone, str):
+            text = milestone.strip()
+            if text:
+                generated.append(text)
+            continue
+        if not isinstance(milestone, dict):
+            continue
+        title = str(milestone.get("title") or milestone.get("objective") or "").strip()
+        if title:
+            generated.append({"item": title, "done": False})
+        for activity in _phase7_as_list(milestone.get("activities")):
+            if str(activity or "").strip():
+                generated.append(activity)
+
+    if generated:
+        return generated
+
+    for item in _student_improvement_source(data):
+        if isinstance(item, dict):
+            text = str(
+                item.get("action")
+                or item.get("title")
+                or item.get("item")
+                or item.get("step")
+                or ""
+            ).strip()
+            if text:
+                generated.append(text)
+        elif str(item or "").strip():
+            generated.append(item)
+
+    return generated
+
+
 def _canonical_student_report(report: dict[str, Any] | None, *, restricted: bool) -> dict[str, Any]:
     data = report if isinstance(report, dict) else {}
     summary = data.get("summary")
@@ -611,9 +890,10 @@ def _canonical_student_report(report: dict[str, Any] | None, *, restricted: bool
     ):
         summary = "The submission triggered safety or confidence checks, so the system returned limited feedback for manual review."
 
+    issues_source = _phase7_as_list(data.get("issues")) or _phase7_as_list(data.get("weaknesses"))
     issues = [
         converted
-        for item in _phase7_as_list(data.get("issues"))
+        for item in issues_source
         if (converted := _as_issue_object(item)) is not None
     ]
     strengths = [
@@ -623,12 +903,12 @@ def _canonical_student_report(report: dict[str, Any] | None, *, restricted: bool
     ]
     plan = [
         converted
-        for index, item in enumerate(_phase7_as_list(data.get("improvement_plan")))
+        for index, item in enumerate(_student_improvement_source(data))
         if (converted := _as_improvement_object(item, index)) is not None
     ]
     checklist = [
         converted
-        for item in _phase7_as_list(data.get("checklist"))
+        for item in _student_checklist_source(data)
         if (converted := _as_checklist_object(item)) is not None
     ]
 
@@ -640,9 +920,14 @@ def _canonical_student_report(report: dict[str, Any] | None, *, restricted: bool
     safety = _phase7_as_dict(data.get("safety"))
 
     final_confidence = _phase7_float(model_agreement.get("final_confidence"), default=-1.0)
+    confidence_score = _phase7_float(confidence.get("score"), default=-1.0)
     overall = _phase7_float(confidence.get("overall"), default=-1.0)
     if overall < 0.0:
-        overall = final_confidence if final_confidence >= 0.0 else (0.35 if restricted else 0.75)
+        overall = (
+            final_confidence
+            if final_confidence >= 0.0
+            else (confidence_score if confidence_score >= 0.0 else (0.35 if restricted else 0.75))
+        )
 
     return {
         "summary": _phase7_text(summary, "Automated review generated with limited confidence.", limit=1200),
@@ -693,8 +978,14 @@ def _canonical_student_report(report: dict[str, Any] | None, *, restricted: bool
         },
         "model_agreement": {
             "ml_confidence": _phase7_float(model_agreement.get("ml_confidence"), default=0.0),
-            "llm_confidence": _phase7_float(model_agreement.get("llm_confidence"), default=0.0),
-            "final_confidence": _phase7_float(model_agreement.get("final_confidence"), default=0.0),
+            "llm_confidence": _phase7_float(
+                model_agreement.get("llm_confidence"),
+                default=(overall if overall >= 0.0 else 0.0),
+            ),
+            "final_confidence": _phase7_float(
+                model_agreement.get("final_confidence"),
+                default=(overall if overall >= 0.0 else 0.0),
+            ),
         },
         "safety": {
             "needs_review": _phase7_bool(safety.get("needs_review"), default=restricted),
@@ -792,35 +1083,27 @@ def _canonical_professor_report(report: dict[str, Any] | None, *, restricted: bo
 
 
 def _normalize_student_report(report: dict[str, Any] | None) -> dict[str, Any]:
-    restricted = _phase7_restricted_mode(report)
     try:
-        return _StoredStudentReport.model_validate(report or {}).model_dump()
-    except ValidationError:
-        try:
-            canonical = _canonical_student_report(report, restricted=restricted)
-            return _StoredStudentReport.model_validate(canonical).model_dump()
-        except ValidationError:
-            fallback = _safe_mode_student(
-                {},
-                reason="A stored student report could not be normalized safely.",
-            )
-            return _StoredStudentReport.model_validate(fallback).model_dump()
+        return _phase10_normalize_student_payload(report or {}).model_dump()
+    except Exception:
+        restricted = _phase7_restricted_mode(report)
+        fallback = _safe_mode_student(
+            {},
+            reason="A stored student report could not be normalized safely.",
+        )
+        fallback["confidence"]["mode"] = "restricted" if restricted else fallback["confidence"]["mode"]
+        return _phase10_normalize_student_payload(fallback).model_dump()
 
 
 def _normalize_professor_report(report: dict[str, Any] | None) -> dict[str, Any]:
-    restricted = _phase7_restricted_mode(report)
     try:
-        return _StoredProfessorReport.model_validate(report or {}).model_dump()
-    except ValidationError:
-        try:
-            canonical = _canonical_professor_report(report, restricted=restricted)
-            return _StoredProfessorReport.model_validate(canonical).model_dump()
-        except ValidationError:
-            fallback = _safe_mode_professor(
-                {},
-                reason="A stored professor report could not be normalized safely.",
-            )
-            return _StoredProfessorReport.model_validate(fallback).model_dump()
+        return _phase10_normalize_professor_payload(report or {}).model_dump()
+    except Exception:
+        fallback = _safe_mode_professor(
+            {},
+            reason="A stored professor report could not be normalized safely.",
+        )
+        return _phase10_normalize_professor_payload(fallback).model_dump()
 
 
 def _normalize_rag_fields(row: dict[str, Any], *, nested_rag: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -832,6 +1115,8 @@ def _normalize_rag_fields(row: dict[str, Any], *, nested_rag: dict[str, Any] | N
             if isinstance(report, dict) and isinstance(report.get("rag_meta"), dict)
             else {}
         )
+    if not nested_rag and isinstance(normalized.get("rag_meta"), dict):
+        nested_rag = normalized.get("rag_meta") or {}
 
     if not nested_rag:
         return normalized
@@ -1062,11 +1347,14 @@ __all__ = [
     "build_ingestion_bundle",
     "call_ai_professor_multimodal",
     "call_ai_student_multimodal",
+    "classify_submission_form",
     "detect_submission_kind",
     "get_rows",
     "load_file",
     "normalize_report_row",
+    "normalize_uuid_insert_payload",
     "post_row",
     "rate_limit",
     "sha256_json",
+    "uuid_or_none",
 ]

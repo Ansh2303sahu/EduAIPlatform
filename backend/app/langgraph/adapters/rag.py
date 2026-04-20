@@ -9,23 +9,27 @@ from __future__ import annotations
 from app.langchain.models import RagContext
 from app.langchain.services.retrieval_packager import pack_professor_rag, pack_student_rag
 
+from . import report_support
 from ..state import Phase12GraphState
 
 
-def _default_query(state: Phase12GraphState) -> str:
+def _submission_form(state: Phase12GraphState) -> str:
+    ingestion = state.pipeline_context.ingestion
+    if ingestion and (
+        ingestion.text_content
+        or ingestion.ocr_text
+        or ingestion.audio_transcript
+        or ingestion.tables_json is not None
+    ):
+        return report_support.classify_submission_form(ingestion)
     submission_kind = state.pipeline_context.submission_kind
-    if state.role == "student":
-        if submission_kind in {"project", "code"}:
-            return "architecture implementation testing security"
-        return "structure argument evidence referencing"
-    if submission_kind in {"project", "code"}:
-        return "rubric project architecture testing moderation"
-    return "rubric policy moderation feedback"
+    return "code" if submission_kind in {"project", "code"} else "essay"
 
 
 def build_seed_payload_from_state(state: Phase12GraphState) -> dict[str, object]:
     """Build a compact retrieval payload reusing the current RAG contracts."""
 
+    mode = _submission_form(state)
     return {
         "submission_id": state.pipeline_context.submission_id,
         "ingestion": state.pipeline_context.ingestion.model_dump(mode="json")
@@ -36,8 +40,8 @@ def build_seed_payload_from_state(state: Phase12GraphState) -> dict[str, object]
         else {},
         "analysis_type": state.pipeline_context.analysis_type.value,
         "submission_type": state.pipeline_context.submission_kind,
-        "mode": state.pipeline_context.submission_kind,
-        "query": _default_query(state),
+        "mode": mode,
+        "submission_form": mode,
     }
 
 
@@ -46,9 +50,9 @@ def pack_rag_for_state(state: Phase12GraphState) -> tuple[dict[str, object], Rag
 
     payload = build_seed_payload_from_state(state)
     if state.role == "student":
-        rag_context = pack_student_rag(payload)
+        payload, rag_context = pack_student_rag(payload)
     else:
-        rag_context = pack_professor_rag(payload)
+        payload, rag_context = pack_professor_rag(payload)
     return payload, rag_context
 
 

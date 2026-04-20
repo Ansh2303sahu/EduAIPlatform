@@ -1,12 +1,12 @@
 "use client";
 
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import {
   AlertTriangle,
   ArrowRight,
   ClipboardCheck,
   Clock3,
-  Download,
   FileSearch,
   History,
   ShieldAlert,
@@ -15,7 +15,62 @@ import {
   Users,
 } from "lucide-react";
 
+import AICheckPanel from "@/components/ai/AICheckPanel";
+import { backendUrl } from "@/lib/backendUrl";
+import { fetchJsonWithAuth } from "@/lib/fetchWithAuth";
+
+type HistoryItem = {
+  id: string;
+  file_id: string;
+  needs_review?: boolean;
+  report_json?: {
+    safety?: {
+      needs_review?: boolean;
+    };
+  };
+  model_versions?: {
+    agreement?: {
+      final_confidence?: number;
+    };
+  };
+};
+
+function pct(n?: number) {
+  if (typeof n !== "number") return "-";
+  return `${Math.round(n * 100)}%`;
+}
+
 export default function ProfessorDashboard() {
+  const [items, setItems] = useState<HistoryItem[]>([]);
+
+  useEffect(() => {
+    let alive = true;
+
+    (async () => {
+      try {
+        const j = await fetchJsonWithAuth(backendUrl("/phase7/history/professor?limit=8"), {
+          method: "GET",
+        });
+        if (!alive) return;
+        setItems(Array.isArray(j?.items) ? j.items : []);
+      } catch {
+        if (!alive) return;
+        setItems([]);
+      }
+    })();
+
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const needsReviewCount = useMemo(
+    () => items.filter((x) => x.needs_review || x.report_json?.safety?.needs_review).length,
+    [items]
+  );
+  const aiCheckFileId = items[0]?.file_id || null;
+  const latestConfidence = items[0]?.model_versions?.agreement?.final_confidence;
+
   return (
     <div className="grid gap-6">
       <section className="grid grid-cols-1 gap-6 xl:grid-cols-[1.25fr_0.75fr]">
@@ -57,27 +112,35 @@ export default function ProfessorDashboard() {
         <div className="grid gap-6">
           <StatCard
             title="Needs review"
-            value="—"
-            sub="From ai_reports.needs_review"
+            value={String(needsReviewCount)}
+            sub="Recent professor items needing attention"
             accent="from-amber-500/15 to-rose-500/10"
             icon={<AlertTriangle size={18} />}
           />
           <StatCard
             title="Recent runs"
-            value="—"
-            sub="From prof_events / inference_events"
+            value={String(items.length)}
+            sub="Latest stored professor reports"
             accent="from-cyan-500/20 to-blue-500/10"
             icon={<Clock3 size={18} />}
           />
           <StatCard
-            title="Exports"
-            value="—"
-            sub="PDF / JSON export panel"
+            title="Latest confidence"
+            value={pct(latestConfidence)}
+            sub={aiCheckFileId ? "Newest professor run below" : "Create a report to populate AI check"}
             accent="from-violet-500/20 to-indigo-500/10"
-            icon={<Download size={18} />}
+            icon={<Sparkles size={18} />}
           />
         </div>
       </section>
+
+      {aiCheckFileId ? (
+        <AICheckPanel fileId={aiCheckFileId} role="professor" />
+      ) : (
+        <section className="rounded-[30px] border border-dashed border-white/10 bg-white/[0.04] p-6 text-sm text-slate-400 shadow-[0_20px_70px_rgba(0,0,0,0.18)] backdrop-blur-xl">
+          The professor AI checker will appear here as soon as at least one professor report is stored.
+        </section>
+      )}
 
       <section className="grid grid-cols-1 gap-6 xl:grid-cols-3">
         <PanelCard

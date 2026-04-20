@@ -21,7 +21,7 @@ NODE_SPEC = Phase12NodeDescriptor(
 
 
 async def critic_node(state: Phase12GraphState) -> Phase12GraphState:
-    """Critique the first draft using phi3; degrade deterministically on failure."""
+    """Critique the first draft using the configured phi3 validator; degrade safely on failure."""
 
     state.set_current_node(NODE_NAME)
     prompt_text = build_critic_prompt(state, state.draft_report)

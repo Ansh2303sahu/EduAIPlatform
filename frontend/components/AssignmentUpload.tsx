@@ -270,7 +270,7 @@ export default function AssignmentUpload({ onFileId }: { onFileId?: (id: string)
   }
 
   async function generateStudentReportSafe(id: string, force = false, signal?: AbortSignal) {
-    return authFetchJsonSafe(backendUrl(`/phase7/student/generate`), {
+    return authFetchJsonSafe(backendUrl(`/ai/generate/student-report`), {
       method: "POST",
       body: JSON.stringify({ file_id: id, force }),
       signal,

@@ -69,6 +69,19 @@ def test_try_parse_json_repairs_partial_missing_closer():
     assert parsed["issues"][0]["title"] == "x"
 
 
+def test_try_parse_json_repairs_unescaped_quotes_inside_string_values():
+    raw = (
+        '{"summary": "Test", "issues": [{"title": "Quoted excerpt", '
+        '"evidence": "The claim in "Week 2 This exercise demonstrates recursive drawing of triangles using midpoint calculations." is broader than the explanation.", '
+        '"severity": "med"}], "safety": {"needs_review": false}}'
+    )
+    parsed, err = try_parse_json(raw)
+    assert err is None
+    assert parsed is not None
+    assert parsed["issues"][0]["title"] == "Quoted excerpt"
+    assert '"Week 2 This exercise demonstrates recursive drawing of triangles using midpoint calculations."' in parsed["issues"][0]["evidence"]
+
+
 def test_validate_student_payload_reports_missing_summary():
     result = validate_student_payload({"issues": []})
     assert result.valid is False

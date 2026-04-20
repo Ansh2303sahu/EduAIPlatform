@@ -9,12 +9,16 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.langchain.config import phase10_settings
 from app.langchain.models import PipelineContext
 from app.langchain.prompts.shared import (
+    build_assignment_context_section,
     build_ml_predictions_section,
     build_output_schema_section,
     build_rag_section,
     build_shared_rules_section,
+    build_representative_excerpts_section,
+    build_submission_digest_section,
     build_submission_evidence_section,
     build_weak_evidence_section,
     join_sections,
@@ -24,6 +28,8 @@ from app.langchain.prompts.shared import (
 
 # Matches the Phase10ProfessorReport shape in app/langchain/schemas.py.
 PROFESSOR_REPORT_SCHEMA_EXAMPLE: dict[str, Any] = {
+    "summary": "string",
+    "evaluator_overview": "string",
     "rubric_breakdown": [
         {
             "criterion": "string",
@@ -31,13 +37,42 @@ PROFESSOR_REPORT_SCHEMA_EXAMPLE: dict[str, Any] = {
             "justification": "string",
         }
     ],
+    "rubric_alignment": ["string"],
     "feedback_explanation": "string",
+    "strengths": [
+        {
+            "title": "string",
+            "evidence": "string",
+            "detail": "string",
+        }
+    ],
+    "concerns": [
+        {
+            "title": "string",
+            "evidence": "string",
+            "detail": "string",
+            "severity": "med",
+        }
+    ],
+    "section_observations": [
+        {
+            "section_name": "string",
+            "observation": "string",
+            "concern": "string",
+            "next_step": "string",
+        }
+    ],
+    "marking_considerations": ["string"],
     "moderation_notes": [
         {
             "risk": "string",
             "note": "string",
         }
     ],
+    "action_recommendations": ["string"],
+    "confidence_explanation": "string",
+    "evidence_coverage": "string",
+    "grounding_summary": "string",
     "safety": {
         "needs_review": False,
         "reason": "string",
@@ -63,13 +98,21 @@ def _build_professor_prompt(ctx: PipelineContext, *, safe_mode: bool) -> str:
         build_shared_rules_section(extra_lines=_professor_shared_extras()),
         build_weak_evidence_section(extra_lines=_professor_weak_evidence_lines(safe_mode)),
         _build_professor_evaluation_section(ctx),
+        _build_professor_richness_section(ctx, safe_mode=safe_mode),
         _build_professor_discrepancy_section(ctx, safe_mode=safe_mode),
+        build_assignment_context_section(
+            file_metadata=ctx.file_metadata,
+            submission_kind=_professor_feedback_mode(ctx),
+            ingestion=ctx.ingestion,
+        ),
+        build_submission_digest_section(ctx.ingestion, submission_kind=_professor_feedback_mode(ctx)),
+        build_representative_excerpts_section(ctx.ingestion),
         build_submission_evidence_section(
             ctx.ingestion,
-            text_limit=1400,
-            ocr_limit=220,
-            transcript_limit=220,
-            table_limit=360,
+            text_limit=min(1800, phase10_settings.prompt_submission_text_chars),
+            ocr_limit=min(320, phase10_settings.prompt_ocr_chars),
+            transcript_limit=min(320, phase10_settings.prompt_transcript_chars),
+            table_limit=min(520, phase10_settings.prompt_table_chars),
         ),
         build_ml_predictions_section(
             "PHASE 6 RUBRIC PREDICTIONS",
@@ -87,10 +130,10 @@ def _build_professor_prompt(ctx: PipelineContext, *, safe_mode: bool) -> str:
             confidence_score=ctx.rag.confidence_score,
             safe_review=ctx.rag.safe_review,
             trace=ctx.rag.trace,
-            context_limit=1400,
-            citation_limit=3,
-            chunk_preview_limit=2,
-            chunk_preview_chars=80,
+            context_limit=min(1900, phase10_settings.prompt_rag_context_chars),
+            citation_limit=min(4, phase10_settings.prompt_rag_citation_limit),
+            chunk_preview_limit=min(3, phase10_settings.prompt_rag_chunk_preview_limit),
+            chunk_preview_chars=min(120, phase10_settings.prompt_rag_chunk_preview_chars),
         ),
         build_output_schema_section(
             "OUTPUT SCHEMA",
@@ -110,6 +153,7 @@ def _build_professor_role_section(ctx: PipelineContext) -> str:
 
     lines = [
         f"You are generating a professor-facing evaluation and moderation report for {submission_label}.",
+        "Focus on the actual submission and the rubric evidence rather than describing the reporting system.",
         "Do not write as if a specific professor is directly addressing a specific student unless the evidence explicitly requires that framing.",
         "Produce an evidence-grounded platform report suitable for review, moderation, and audit.",
     ]
@@ -129,8 +173,9 @@ def _build_professor_evaluation_section(ctx: PipelineContext) -> str:
     lines = [
         "Rubric bands must be grounded in explicit evidence from the submission or approved retrieved guidance.",
         "Use Phase 6 rubric predictions as a prior signal, not as the final decision.",
-        "feedback_explanation should explain the overall judgment in concise, evidence-based prose.",
+        "summary and evaluator_overview should explain the overall judgment in concise, evidence-based prose.",
         "moderation_notes should capture risks, edge cases, or evidence gaps that matter for human review.",
+        "Every criticism must explain what is weak, where it appears, why it matters, and how to improve or review it.",
     ]
     if mode == "project" or ctx.submission_kind == "project":
         lines.extend(
@@ -151,6 +196,23 @@ def _build_professor_evaluation_section(ctx: PipelineContext) -> str:
     elif mode == "feedback":
         lines.append("Keep feedback_explanation precise and suitable for a feedback-template context, not a free-form essay response.")
     return render_bullets("EVIDENCE-GROUNDED EVALUATION", lines)
+
+
+def _build_professor_richness_section(ctx: PipelineContext, *, safe_mode: bool) -> str:
+    lines = [
+        "Use rubric rows to cover distinct dimensions rather than restating the same weakness with new labels.",
+        "feedback_explanation should synthesise the overall judgement, strongest evidence, weakest evidence, and the main moderation risk.",
+        "Use section_observations to separate what was observed, what is concerning, and what a reviewer should check next.",
+        "moderation_notes should tell a human marker what to verify, not just repeat the final judgement.",
+        "Keep justifications concise but specific: 2 to 3 sentences that connect evidence, band logic, and uncertainty.",
+    ]
+    if ctx.submission_kind == "project":
+        lines.append("When evidence allows, spread coverage across architecture, implementation depth, testing or evaluation, security or risk, and academic quality.")
+    else:
+        lines.append("When evidence allows, spread coverage across argument quality, structure, evidence use, analysis depth, clarity, and referencing.")
+    if safe_mode:
+        lines.append("Restricted mode should reduce certainty, not reduce the report to generic moderation boilerplate.")
+    return render_bullets("RICH OUTPUT TARGET", lines)
 
 
 def _build_professor_discrepancy_section(ctx: PipelineContext, *, safe_mode: bool) -> str:
@@ -182,6 +244,7 @@ def _professor_shared_extras() -> list[str]:
     return [
         "Keep the evaluation concise, production-style, and audit-friendly.",
         "Do not include conversational feedback outside the schema.",
+        "Do not describe the platform, system, pipeline, or model unless the schema explicitly requires a confidence or safety explanation.",
     ]
 
 
@@ -198,11 +261,19 @@ def _professor_weak_evidence_lines(safe_mode: bool) -> list[str]:
 def _professor_field_rules(ctx: PipelineContext, *, safe_mode: bool) -> list[str]:
     mode = _professor_feedback_mode(ctx)
     rules = [
+        "summary and evaluator_overview must be substantive and must not be generic system-level phrasing.",
         "rubric_breakdown must be an array of at least 2 criterion rows covering the key assessed dimensions of the submission.",
+        "Prefer 3 to 5 distinct rubric rows when the evidence allows; avoid duplicate dimensions.",
         "Every rubric_breakdown justification must reference concrete evidence from the submission or approved retrieved context - do not use generic placeholder justifications.",
+        "rubric_alignment should list concrete assessed dimensions or criteria, not vague single-word labels.",
         "feedback_explanation is required, must be at least 2 full sentences, and must ground its judgment in the submission evidence.",
+        "concerns or weaknesses should identify the main risks for marking consistency or academic quality.",
+        "section_observations should cover at least 2 distinct sections or dimensions when the evidence allows.",
+        "marking_considerations and action_recommendations should give the reviewer useful next checks or moderation actions.",
         "moderation_notes must always be an array. Include at least 1 item identifying a risk, evidence gap, or edge case even when the overall report is safe.",
+        "Make moderation_notes practically useful by naming what a human marker should verify or challenge.",
         "If rubric evidence is insufficient to support a criterion, state what is missing rather than awarding a confident band.",
+        "confidence_explanation must explain confidence in terms of evidence coverage, consistency, and grounding.",
         "safety.reason may be empty only when there is no meaningful review concern.",
     ]
     if mode == "project" or ctx.submission_kind == "project":

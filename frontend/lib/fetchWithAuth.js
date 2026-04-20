@@ -127,9 +127,15 @@ export async function fetchJsonWithAuth(url, options = {}, config = {}) {
   const body = await safeReadJson(res);
 
   if (!res.ok) {
+    const detail =
+      typeof body?.detail === "string"
+        ? body.detail
+        : typeof body?.error === "string"
+        ? body.error
+        : undefined;
     throw {
       code: body?.code || `HTTP_${res.status}`,
-      message: body?.message || `Request failed (${res.status})`,
+      message: body?.message || detail || `Request failed (${res.status})`,
       status: res.status,
       traceId: body?.traceId || body?.trace_id || res.headers.get("x-trace-id") || undefined,
       requestId: res.headers.get("x-request-id") || config.requestId,

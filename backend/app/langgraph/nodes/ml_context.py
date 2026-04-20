@@ -29,18 +29,13 @@ async def run(state: Phase12GraphState) -> Phase12GraphState:
     """Normalize ML responses into the shared Phase 10 pipeline context."""
 
     if state.role == "student":
-        result, text = normalize_student_ml_context(
-            state.pipeline_context.ml_raw,
-            analysis_type=state.pipeline_context.analysis_type,
-        )
+        result = normalize_student_ml_context(state.pipeline_context.ml_raw)
     else:
-        result, text = normalize_professor_ml_context(
-            state.pipeline_context.ml_raw,
-            analysis_type=state.pipeline_context.analysis_type,
-        )
+        result = normalize_professor_ml_context(state.pipeline_context.ml_raw)
+    text = result.context_text
     state.pipeline_context.ml_result = result
     state.pipeline_context.ml_context_text = text
-    state.pipeline_context.execution_meta.decision_source = DecisionSource.HYBRID.value
+    state.pipeline_context.execution_meta.decision_source = DecisionSource.HYBRID
     record_event(
         state,
         NODE_NAME,

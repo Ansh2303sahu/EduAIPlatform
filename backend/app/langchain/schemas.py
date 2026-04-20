@@ -29,12 +29,14 @@ from pydantic import BaseModel, Field
 class _Issue(BaseModel):
     title: str
     evidence: str
+    detail: str = ""
     severity: Literal["low", "med", "high"] = "low"
 
 
 class _Strength(BaseModel):
     title: str
     evidence: str
+    detail: str = ""
 
 
 class _ImprovementAction(BaseModel):
@@ -106,6 +108,26 @@ class _ModerationNote(BaseModel):
     note: str
 
 
+class _SectionFeedback(BaseModel):
+    section_name: str = ""
+    what_works: str = ""
+    what_needs_improvement: str = ""
+    recommended_fix: str = ""
+
+
+class _PriorityIssue(BaseModel):
+    title: str = ""
+    why_it_matters: str = ""
+    how_to_fix_it: str = ""
+
+
+class _SectionObservation(BaseModel):
+    section_name: str = ""
+    observation: str = ""
+    concern: str = ""
+    next_step: str = ""
+
+
 # ===========================================================================
 # Phase 10 request schemas
 # ===========================================================================
@@ -127,14 +149,21 @@ class Phase10StudentReport(BaseModel):
     model_config = {"protected_namespaces": ()}
 
     summary: str
+    overall_judgment: str = ""
     issues: List[_Issue] = Field(default_factory=list)
     strengths: List[_Strength] = Field(default_factory=list)
+    weaknesses: List[_Issue] = Field(default_factory=list)
+    section_feedback: List[_SectionFeedback] = Field(default_factory=list)
+    priority_issue: _PriorityIssue = Field(default_factory=_PriorityIssue)
     architecture_review: _ArchitectureReview = Field(default_factory=_ArchitectureReview)
     implementation_review: _ImplementationReview = Field(default_factory=_ImplementationReview)
     evaluation_review: _EvaluationReview = Field(default_factory=_EvaluationReview)
     improvement_plan: List[_ImprovementAction] = Field(default_factory=list)
     checklist: List[_ChecklistItem] = Field(default_factory=list)
     confidence: _ConfidenceSummary = Field(default_factory=_ConfidenceSummary)
+    confidence_explanation: str = ""
+    evidence_coverage: str = ""
+    grounding_summary: str = ""
     model_agreement: _ModelAgreement = Field(default_factory=_ModelAgreement)
     safety: _Safety = Field(default_factory=_Safety)
     rag_meta: Optional[_RagMeta] = None
@@ -143,9 +172,21 @@ class Phase10StudentReport(BaseModel):
 class Phase10ProfessorReport(BaseModel):
     """Full professor report shape returned by Phase 10."""
 
+    summary: str = ""
+    evaluator_overview: str = ""
     rubric_breakdown: List[_RubricRow] = Field(default_factory=list)
+    rubric_alignment: List[str] = Field(default_factory=list)
     feedback_explanation: str = ""
+    strengths: List[_Strength] = Field(default_factory=list)
+    concerns: List[_Issue] = Field(default_factory=list)
+    weaknesses: List[_Issue] = Field(default_factory=list)
+    section_observations: List[_SectionObservation] = Field(default_factory=list)
+    marking_considerations: List[str] = Field(default_factory=list)
     moderation_notes: List[_ModerationNote] = Field(default_factory=list)
+    action_recommendations: List[str] = Field(default_factory=list)
+    confidence_explanation: str = ""
+    evidence_coverage: str = ""
+    grounding_summary: str = ""
     safety: _Safety = Field(default_factory=_Safety)
     rag_meta: Optional[_RagMeta] = None
 
@@ -197,6 +238,8 @@ class LangChainStoredSummary(BaseModel):
 
 class LangChainResponseMeta(BaseModel):
     """Public metadata for a LangChain generation run."""
+
+    model_config = {"protected_namespaces": ()}
 
     role: Literal["student", "professor"]
     needs_review: bool = False

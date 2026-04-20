@@ -101,7 +101,7 @@ async def safe_mode_decision_node(state: Phase12GraphState) -> Phase12GraphState
     if downgrade_decision.allowed:
         state.pipeline_context.mode = PipelineMode.RESTRICTED
         state.pipeline_context.execution_mode = ExecutionMode.SAFE
-        state.pipeline_context.execution_meta.execution_mode = ExecutionMode.SAFE.value
+        state.pipeline_context.execution_meta.execution_mode = ExecutionMode.SAFE
         state.add_warning("Safe mode activated for conservative downstream handling.")
         reason = downgrade_decision.reason or "Safe mode activated by policy."
         return succeed_node(
@@ -120,7 +120,7 @@ async def safe_mode_decision_node(state: Phase12GraphState) -> Phase12GraphState
 
     state.pipeline_context.mode = PipelineMode.NORMAL
     state.pipeline_context.execution_mode = ExecutionMode.NORMAL
-    state.pipeline_context.execution_meta.execution_mode = ExecutionMode.NORMAL.value
+    state.pipeline_context.execution_meta.execution_mode = ExecutionMode.NORMAL
     return succeed_node(
         state,
         node_name=NODE_NAME,

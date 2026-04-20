@@ -11,6 +11,7 @@ from functools import lru_cache
 
 from langgraph.graph import END, START, StateGraph
 
+from ..config import phase12_settings
 from ..nodes import (
     evidence_sufficiency_node,
     final_guardrail_node,
@@ -38,9 +39,14 @@ def _route_after_gate(state: Phase12GraphState) -> str:
     return "end" if _blocked_or_failed(state) else "next"
 
 
+async def _input_validation_node(state: Phase12GraphState) -> Phase12GraphState:
+    state.graph_name = phase12_settings.student_graph_name
+    return await input_validation_node(state)
+
+
 def build_student_generative_graph():
     graph = StateGraph(Phase12GraphState)
-    graph.add_node("input_validation", input_validation_node)
+    graph.add_node("input_validation", _input_validation_node)
     graph.add_node("policy_check", policy_check_node)
     graph.add_node("evidence_sufficiency", evidence_sufficiency_node)
     graph.add_node("ml_decision", ml_decision_node)

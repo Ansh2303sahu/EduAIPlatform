@@ -57,6 +57,8 @@ from app.langchain.services.retrieval_packager import (
     summarize_rag_trace,
 )
 from app.rag.store import build_storage_fields_from_rag_meta
+from app.services.report_richness import report_low_content_quality, report_richness_score
+from app.services.uuid_normalization import uuid_or_none
 
 logger = logging.getLogger("phase10.professor_pipeline")
 
@@ -121,6 +123,7 @@ class ProfessorPipeline:
             execution_mode=ExecutionMode.NORMAL,
             submission_kind=submission_kind,
             ingestion=IngestionBundle(**sanitized_ingestion),
+            file_metadata=dict(file_metadata or {}),
             injection_detected=injected,
             injection_reason=injection_reason,
             ml_raw=dict(ml_dict or {}),
@@ -274,6 +277,7 @@ class ProfessorPipeline:
             retrieval_weak=retrieval_weak,
             low_confidence=low_confidence,
         )
+        await self._retry_low_quality_report(ctx, execution_logger)
         _apply_professor_quality_gate(ctx)
         ctx.rag_meta = _build_rag_meta(ctx.rag)
         ctx.timings_ms["moderation"] = moderation_checks["timing_ms"]
@@ -324,7 +328,10 @@ class ProfessorPipeline:
         try:
             raw, model_label = await run_with_fallback(
                 primary_chain,
-                {"prompt_text": ctx.prompt_text},
+                {
+                    "prompt_text": ctx.prompt_text,
+                    "submission_chars": len(ctx.ingestion.text_content or "") + len(ctx.ingestion.audio_transcript or "") + len(ctx.ingestion.ocr_text or ""),
+                },
                 role="professor",
                 request_id=ctx.request_id,
                 execution_logger=execution_logger,
@@ -409,6 +416,85 @@ class ProfessorPipeline:
             repaired=repaired,
         )
         return {}, validation, False, "malformed_output"
+
+    async def _retry_low_quality_report(
+        self,
+        ctx: PipelineContext,
+        execution_logger: Phase10ExecutionLogger,
+    ) -> bool:
+        if not report_low_content_quality("professor", ctx.report):
+            return False
+
+        retry_prompt = (
+            ctx.prompt_text.rstrip()
+            + "\n\nQUALITY RETRY\n"
+            + "- The previous draft was too generic, repetitive, or weakly grounded.\n"
+            + "- Regenerate a richer professor-facing moderation report.\n"
+            + "- Every concern must state what is weak, where it appears, why it matters for marking or moderation, and what should be reviewed next.\n"
+            + "- Prefer rubric-linked evidence, section-specific observations, and concrete reviewer actions.\n"
+            + "- Avoid system-centric phrasing, vague praise, and repeated sentences.\n"
+        )
+
+        primary_model = get_primary_model(role="professor")
+        primary_chain = build_generation_chain(primary_model)
+        try:
+            raw_text, model_label = await run_with_fallback(
+                primary_chain,
+                {
+                    "prompt_text": retry_prompt,
+                    "submission_chars": len(ctx.ingestion.text_content or "") + len(ctx.ingestion.audio_transcript or "") + len(ctx.ingestion.ocr_text or ""),
+                },
+                role="professor",
+                request_id=ctx.request_id,
+                execution_logger=execution_logger,
+            )
+        except RuntimeError:
+            return False
+
+        previous_raw = ctx.raw_llm_output
+        previous_report = dict(ctx.report)
+        previous_validation = ctx.validation_result.model_copy(deep=True)
+
+        ctx.raw_llm_output = raw_text
+        candidate_report, candidate_validation, llm_ok, fallback_reason = await self._parse_validate_normalize(
+            ctx,
+            execution_logger,
+        )
+        if fallback_reason or not llm_ok:
+            ctx.raw_llm_output = previous_raw
+            ctx.report = previous_report
+            ctx.validation_result = previous_validation
+            return False
+
+        old_score = report_richness_score("professor", previous_report)
+        new_score = report_richness_score("professor", candidate_report)
+        if report_low_content_quality("professor", candidate_report) and new_score <= old_score:
+            ctx.raw_llm_output = previous_raw
+            ctx.report = previous_report
+            ctx.validation_result = previous_validation
+            return False
+
+        ctx.report = candidate_report
+        ctx.validation_result = ValidationResult(
+            valid=candidate_validation.valid,
+            warnings=[
+                *list(previous_validation.warnings),
+                *list(candidate_validation.warnings),
+                "The first draft was too generic, so the pipeline regenerated the report with stricter richness instructions.",
+            ],
+            stage=PipelineStage.VALIDATE,
+            repaired=bool(candidate_validation.repaired or previous_validation.repaired),
+        )
+        ctx.llm_ok = True
+        ctx.model_used = model_label or ctx.model_used
+        ctx.fallback_used = bool(
+            ctx.fallback_used
+            or model_label == phase10_settings.llm_fallback_label
+            or execution_logger.record.fallback_triggered
+        )
+        ctx.prompt_meta["quality_retry"] = True
+        ctx.prompt_meta["quality_retry_richness_gain"] = max(0, new_score - old_score)
+        return True
 
     def _package_retrieval(
         self,
@@ -909,12 +995,7 @@ def _apply_professor_quality_gate(ctx: PipelineContext) -> None:
     force needs_review and lower confidence so the result is not stored with a
     falsely confident disposition.
     """
-    report = ctx.report
-    rubric = [x for x in (report.get("rubric_breakdown") or []) if x]
-    explanation = str(report.get("feedback_explanation") or "").strip()
-
-    has_content = len(rubric) >= 1 or len(explanation) > 50
-    if has_content:
+    if not report_low_content_quality("professor", ctx.report):
         return
 
     ctx.report.setdefault("safety", {})["needs_review"] = True
@@ -1025,9 +1106,39 @@ def _professor_report_from_native_fallback(
     )
 
     return {
+        "summary": "The automated moderation result is provisional and needs human review before use.",
+        "evaluator_overview": "The pipeline returned a conservative fallback response because the generation path did not remain reliable.",
         "rubric_breakdown": rubric_rows,
+        "rubric_alignment": [],
         "feedback_explanation": feedback_explanation,
+        "strengths": [],
+        "concerns": [
+            {
+                "title": moderation_rows[0]["risk"],
+                "evidence": moderation_rows[0]["note"],
+                "detail": moderation_rows[0]["note"],
+                "severity": "high",
+            }
+        ],
+        "weaknesses": [
+            {
+                "title": moderation_rows[0]["risk"],
+                "evidence": moderation_rows[0]["note"],
+                "detail": moderation_rows[0]["note"],
+                "severity": "high",
+            }
+        ],
+        "section_observations": [],
+        "marking_considerations": [
+            "Review the original submission before relying on this moderation output.",
+        ],
         "moderation_notes": moderation_rows,
+        "action_recommendations": [
+            "Re-run moderation once the generation path is stable or review the submission manually.",
+        ],
+        "confidence_explanation": "Confidence is restricted because the pipeline had to fall back to a conservative safe response.",
+        "evidence_coverage": "Evidence coverage is insufficient for a richer automated moderation judgement.",
+        "grounding_summary": "Grounded detail could not be preserved because the generation path failed or remained unreliable.",
         "safety": {
             "needs_review": True,
             "reason": safety_reason,
@@ -1101,8 +1212,8 @@ def _build_result_payload(
 ) -> dict[str, Any]:
     storage_fields = build_storage_fields_from_rag_meta(ctx.rag_meta)
     storage_payload = {
-        "file_id": ctx.file_id,
-        "submission_id": ctx.submission_id,
+        "file_id": uuid_or_none(ctx.file_id),
+        "submission_id": uuid_or_none(ctx.submission_id),
         "role": ctx.role.value,
         "report_json": ctx.report,
         "needs_review": bool((ctx.report.get("safety") or {}).get("needs_review", False)),

@@ -271,29 +271,29 @@ class ProfIngestionRepo:
         file_id: str,
         source_sha256: str,
         redacted_text: str,
-        redaction_summary: dict,
-        extra_meta: dict | None = None,
+        redaction_summary: dict[str, Any],
+        extra_meta: dict[str, Any] | None = None,
     ) -> None:
         url = f"{self.base}/rest/v1/prof_insights"
 
         text_cols = ["redacted_text", "text", "content"]
         summary_cols = ["redaction_summary", "summary", "meta"]
 
-        base_row_common = {
+        base_row_common: dict[str, Any] = {
             "user_id": user_id,
             "job_id": job_id,
             "file_id": file_id,
             "source_sha256": source_sha256,
         }
 
-        meta_payload = {"redaction": redaction_summary}
+        meta_payload: dict[str, Any] = {"redaction": redaction_summary}
         if extra_meta:
             meta_payload.update(extra_meta)
 
         last_err: tuple[int, str] | None = None
         for tcol in text_cols:
             for scol in summary_cols:
-                row = dict(base_row_common)
+                row: dict[str, Any] = dict(base_row_common)
                 row[tcol] = redacted_text
                 row[scol] = redaction_summary if scol != "meta" else meta_payload
 

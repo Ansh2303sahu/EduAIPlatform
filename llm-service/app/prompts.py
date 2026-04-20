@@ -42,11 +42,55 @@ _FINAL_JSON_REMINDER = (
     'Do not use markdown fences.'
 )
 
+# Override older wording with a shorter, stricter local-model contract.
+_JSON_RULES = """
+MANDATORY OUTPUT FORMAT
+- Return one valid JSON object only.
+- Do not include markdown.
+- Do not include explanation.
+- Do not include text before the opening {.
+- Do not include text after the closing }.
+- The response must start with { and end with }.
+- Use double quotes for all keys and string values.
+- Include every required field in the schema.
+- Use [] for empty arrays.
+- Do not add keys that are not in the schema.
+- Use JSON true / false / null, not Python literals.
+""".strip()
+
+_STRICT_STUDENT_JSON_OUTPUT_RULES = """
+STRICT OUTPUT RULES
+- Return exactly one JSON object and nothing else.
+- The first character must be {.
+- The last character must be }.
+- The first key should be "summary" or "main_excerpt".
+- Do not add prose before or after the JSON.
+- Do not wrap the JSON in markdown fences.
+- If a value is uncertain, still return a valid JSON value.
+- Do not omit both "summary" and "main_excerpt".
+- Prefer flat fields and short arrays of strings when possible.
+- Severity values must be exactly "low", "med", or "high".
+- "confidence_0_to_4" must be an integer from 0 to 4.
+- "quality_band" and "confidence_label" must be one of: "low", "medium", "high".
+- If the schema contains "confidence", then "confidence.mode" must be exactly "normal" or "restricted".
+- Use [] for empty arrays and keep all defined fields present.
+""".strip()
+
+_FINAL_JSON_REMINDER = (
+    "Return one valid JSON object only. "
+    "Do not include markdown or commentary. "
+    "The first character must be { and the last character must be }."
+)
+
 
 # Adaptive excerpt caps — thresholds are exported so main.py can log them.
 # Normal: text_content ≤ LONG_INPUT_THRESHOLD  (no cap-reduction)
 # Long:   text_content >  LONG_INPUT_THRESHOLD  (tighter cap + fewer snippets)
 LONG_INPUT_THRESHOLD: int = 8_000
+RAG_CONTEXT_CHAR_LIMIT: int = 3_200
+RAG_INSTRUCTION_CHAR_LIMIT: int = 500
+RAG_CITATION_LIMIT: int = 4
+RAG_CHUNK_LIMIT: int = 3
 
 _EXCERPT_CODE_NORMAL:  int = 2_800
 _EXCERPT_CODE_LONG:    int = 1_800
@@ -56,9 +100,9 @@ _EXCERPT_ESSAY_LONG:   int = 1_400
 
 def _compact_ingestion(ing) -> str:
     obj = {
-        "text_content": (ing.text_content or "")[:5_000],
-        "ocr_text": (ing.ocr_text or "")[:2_000],
-        "audio_transcript": (ing.audio_transcript or "")[:2_000],
+        "text_content": (ing.text_content or "")[:3_800],
+        "ocr_text": (ing.ocr_text or "")[:600],
+        "audio_transcript": (ing.audio_transcript or "")[:600],
         "tables_json": ing.tables_json or {},
     }
     return json.dumps(obj, ensure_ascii=False)
@@ -101,7 +145,7 @@ IMPORTANT INSTRUCTIONS
 """.strip()
 
     citation_lines = []
-    for fallback_idx, c in enumerate(citations or [], start=1):
+    for fallback_idx, c in enumerate((citations or [])[:RAG_CITATION_LIMIT], start=1):
         idx = _field(c, "index", fallback_idx)
         title = _field(c, "title", "Untitled")
         section = _field(c, "section", "unknown")
@@ -112,7 +156,7 @@ IMPORTANT INSTRUCTIONS
         citation_block = "No citation metadata provided."
 
     chunk_lines = []
-    for idx, chunk in enumerate((retrieved_chunks or [])[:4], start=1):
+    for idx, chunk in enumerate((retrieved_chunks or [])[:RAG_CHUNK_LIMIT], start=1):
         title = _field(chunk, "document_title", "Untitled")
         section = _field(chunk, "section", "unknown")
         category = _field(chunk, "category", "general")
@@ -130,7 +174,7 @@ ACADEMIC KNOWLEDGE BASE
 The following information was retrieved from approved academic guidance documents.
 
 Retrieved context:
-{context}
+{_clip_text(context, RAG_CONTEXT_CHAR_LIMIT)}
 
 Retrieved citations:
 {citation_block}
@@ -144,7 +188,7 @@ Retrieval confidence:
 - safe_review: {bool(safe_review)}
 
 IMPORTANT INSTRUCTIONS
-{instruction or "Use the retrieved context carefully and avoid unsupported claims."}
+{_clip_text(instruction or "Use the retrieved context carefully and avoid unsupported claims.", RAG_INSTRUCTION_CHAR_LIMIT)}
 
 Use this knowledge when giving feedback.
 When your output fields draw on the retrieved context, reference the source inline using its citation index, e.g. [1] or [2], matching the indices listed above.
@@ -259,6 +303,53 @@ def _student_project_schema() -> dict:
             "reason": "string"
         }
     }
+
+
+def _student_compact_schema(feedback_category: str) -> dict:
+    return {
+        "feedback_category": feedback_category,
+        "quality_band": "low",
+        "confidence_0_to_4": 0,
+        "confidence_label": "low",
+        "safe_review": False,
+        "safety_reason": "string",
+        "main_excerpt": "string",
+        "strengths": ["string"],
+        "weaknesses": ["string"],
+        "improvements": ["string"],
+    }
+
+
+def _student_compact_project_schema() -> dict:
+    return {
+        "summary": "string",
+        "strengths": ["string"],
+        "weaknesses": ["string"],
+        "architecture_review": {
+            "overview": "string",
+            "backend": "string",
+            "frontend": "string",
+            "database": "string",
+            "security": "string"
+        },
+        "implementation_review": {
+            "features_built": ["string"],
+            "technical_quality": "string",
+            "integration_quality": "string"
+        },
+        "evaluation_review": {
+            "testing_present": "string",
+            "limitations": "string",
+            "academic_quality": "string"
+        },
+        "improvements": ["string"],
+        "checklist": ["string"],
+        "confidence_0_to_4": 0,
+        "safe_review": False,
+        "safety_reason": "string"
+    }
+
+
 def _collapse_ws(value: str | None) -> str:
     return " ".join((value or "").split())
 def _clip_text(value: str | None, limit: int) -> str:
@@ -420,21 +511,21 @@ def _student_content_floor(feedback_style: str) -> str:
 CONTENT FLOOR
 - Do not return the placeholder phrases "Automated review generated with limited confidence." or "Not assessed." unless the submission truly provides no evidence for that exact field.
 - If evidence is limited for a field, write a short evidence-gap explanation such as "Evidence is limited for backend structure because ..." rather than using "Not assessed." by itself.
-- If the submission clearly names technologies, features, tests, dashboards, APIs, data models, or security controls, do not leave issues, improvement_plan, and checklist all empty.
-- When the submission contains enough evidence, include at least 2 strengths, 2-3 issues, 2-3 improvement actions, and 3 checklist items.
+- If the submission clearly names technologies, features, tests, dashboards, APIs, data models, or security controls, do not leave strengths, weaknesses, improvements, and checklist all empty.
+- When the submission contains enough evidence, include at least 2 strengths, 2-3 weaknesses, 2-3 improvement actions, and 3 checklist items.
 - Each architecture_review, implementation_review, and evaluation_review field must contain a concrete observation tied to the submission or a specific evidence-gap explanation.
 - If you identify implemented components, name them directly: frameworks, routes, pages, services, APIs, data models, dashboards, tests, workflows, or security controls.
 - Do not invent web-app concerns for a local or desktop tool. Missing authentication is only an issue when the evidence shows accounts, roles, sensitive remote access, or an exposed multi-user workflow.
-- If you produce substantive feedback, set model_agreement.llm_confidence and model_agreement.final_confidence to non-zero values that reflect how reliable the feedback is.
+- If you produce substantive feedback, set confidence_0_to_4 above 0 to reflect how reliable the feedback is.
 """.strip()
     return """
 CONTENT FLOOR
 - Do not return the placeholder phrase "Automated review generated with limited confidence." unless the submission truly provides almost no usable evidence.
-- If the submission contains concrete topic evidence, do not leave issues, improvement_plan, and checklist all empty.
-- When the submission contains enough evidence, include at least 2 strengths, 2-3 issues, 2-3 improvement actions, and 3 checklist items.
+- If the submission contains concrete topic evidence, do not leave strengths, weaknesses, improvements, and checklist all empty.
+- When the submission contains enough evidence, include at least 2 strengths, 2-3 weaknesses, 2-3 improvement actions, and 3 checklist items.
 - Keep the summary concrete and tied to the actual submission rather than generic academic advice.
 - Keep the language academic. Do not drift into software-review phrases such as implementation quality, separation of concerns, APIs, or authentication unless the submission is clearly a software build report.
-- If you produce substantive feedback, set model_agreement.llm_confidence and model_agreement.final_confidence to non-zero values that reflect how reliable the feedback is.
+- If you produce substantive feedback, set confidence_0_to_4 above 0 to reflect how reliable the feedback is.
 """.strip()
 def _keyword_score(text: str, terms: tuple[str, ...]) -> int:
     lowered = text.casefold()
@@ -515,7 +606,7 @@ ASSESSOR STYLE
 - Avoid vague praise such as "good project" unless you name the specific technical strength and why it matters.
 ISSUE WRITING
 - Make each issue title specific.
-- In the evidence field, explain the technical weakness, why it matters, and the likely fix direction.
+- Each weakness string must name the technical weakness, why it matters, and the likely fix direction.
 SEVERITY CALIBRATION
 - Use "high" for correctness, security, data integrity, or failure-handling gaps that could seriously undermine trust in the system.
 - Use "med" for testing, maintainability, modularity, separation-of-concerns, or performance gaps that materially limit quality.
@@ -528,7 +619,7 @@ ASSESSOR STYLE
 - Avoid generic praise; name the exact strength and why it is academically effective.
 ISSUE WRITING
 - Make each issue title specific.
-- In the evidence field, explain the academic weakness, why it matters to the quality of the argument or grade, and the revision direction.
+- Each weakness string must name the academic weakness, why it matters to the quality of the argument or grade, and the revision direction.
 SEVERITY CALIBRATION
 - Use "high" for serious thesis, structure, analysis, evidence, or referencing problems that weaken the submission substantially.
 - Use "med" for partially developed analysis, weak paragraph logic, shallow evidence handling, or inconsistent academic clarity.
@@ -546,7 +637,11 @@ def student_prompt(payload: StudentReportIn, safe_mode: bool) -> tuple[str, int,
     project_review = analysis_type == "student_project_review"
     feedback_style = student_feedback_style(payload, project_review=project_review)
     code_style = feedback_style == "code"
-    schema = _student_project_schema() if code_style else _student_standard_schema()
+    compact_schema = (
+        _student_compact_project_schema()
+        if code_style
+        else _student_compact_schema("academic review")
+    )
     rag = _safe_get(payload, "rag", None)
     grounding_context = _safe_get(payload, "grounding_context", "")
     grounding_instruction = _safe_get(payload, "grounding_instruction", "")
@@ -579,10 +674,10 @@ SAFE MODE:
 - Being cautious means qualifying your claims, not omitting them. Write feedback that is hedged but still specific and useful.
 - Keep claims conservative and avoid strong assertions where evidence is limited.
 - Do not grade.
-- Set safety.needs_review to true.
-- Explain the reason briefly in safety.reason (1-2 sentences).
-- If the retrieved academic guidance is weak or uncertain, mention limited grounding in safety.reason.
-- summary, issues, improvement_plan, and checklist must all contain substantive content.
+- Set safe_review to true.
+- Explain the reason briefly in safety_reason (1-2 sentences).
+- If the retrieved academic guidance is weak or uncertain, mention limited grounding in safety_reason.
+- summary, weaknesses, improvements, and checklist must all contain substantive content.
 """
         if safe_mode
         else
@@ -590,9 +685,9 @@ SAFE MODE:
 NORMAL MODE:
 - Be specific and constructive.
 - Do not grade.
-- Set safety.needs_review to false unless there is a strong reason.
+- Set safe_review to false unless there is a strong reason.
 - Prefer advice that is supported by the retrieved academic guidance.
-- If retrieval confidence is low, avoid overclaiming and use safety.reason to explain uncertainty when needed.
+- If retrieval confidence is low, avoid overclaiming and use safety_reason to explain uncertainty when needed.
 """
     ).strip()
 
@@ -607,24 +702,24 @@ You are a senior university computing assessor with deep expertise in software e
 Your task: produce detailed technical feedback for the student software or code submission below.
 {_JSON_RULES}
 {_STRICT_STUDENT_JSON_OUTPUT_RULES}
-You MUST return exactly one JSON object matching this schema:
-{json.dumps(schema, ensure_ascii=False, indent=2)}
+You MUST return exactly one JSON object using this compact local-model shape:
+{json.dumps(compact_schema, ensure_ascii=False, indent=2)}
+The service will expand this compact shape after parsing. Do not return the larger expanded schema.
 Extra constraints:
 - "summary" must be 2-4 sentences giving a concrete overview of the submission goal, overall technical quality, and the most important gap.
-- "issues" must be an array of objects with keys: title, evidence, severity.
-- "severity" must be exactly one of: "low", "med", "high".
-- "strengths" must be an array of objects with keys: title, evidence.
+- "strengths", "weaknesses", "improvements", and "checklist" must be arrays of short specific strings.
+- "weaknesses" replaces "issues" and "improvements" replaces "improvement_plan".
+- Use 2-4 strengths, 2-4 weaknesses, 2-3 improvements, and exactly 3 checklist items when the evidence supports it.
+- Keep each strength, weakness, and checklist item to one short sentence.
 - "architecture_review" must contain keys: overview, backend, frontend, database, security.
 - "implementation_review" must contain keys: features_built, technical_quality, integration_quality.
-- "features_built" must be a list of concrete implemented capabilities, modules, workflows, or endpoints when present.
+- "features_built" must list at most 4 concrete implemented capabilities, modules, workflows, or endpoints when present.
 - "evaluation_review" must contain keys: testing_present, limitations, academic_quality.
-- "improvement_plan" must be an array of objects with keys: action, why, how, priority.
-- "checklist" must be an array of objects with keys: item, done.
-- "confidence" must contain keys: mode, overall.
-- "confidence.mode" must be exactly "{'restricted' if safe_mode else 'normal'}".
-- "confidence.overall" must be a number between 0.0 and 1.0.
-- "model_agreement" values must be numbers between 0.0 and 1.0.
-- "safety" must contain keys: needs_review, reason.
+- Each architecture_review, implementation_review, and evaluation_review field should be one short sentence only.
+- "confidence_0_to_4" must be an integer from 0 to 4.
+- "safe_review" must be a boolean and "safety_reason" must be a short string.
+- Do not return nested issue objects, checklist objects, "confidence", "model_agreement", or extra keys.
+- Be concise and avoid repeating the same point across summary, strengths, weaknesses, and improvements.
 - No extra keys anywhere.
 - Restricted mode does not change the schema. The JSON shape must stay identical to normal mode.
 {_student_style_block("code")}
@@ -634,17 +729,17 @@ SOFTWARE REVIEW RULES
 - Distinguish clearly between implemented features, partial work, and future work.
 - Keep each issue tied to a specific technical gap, risk, or maintenance consequence.
 - Keep each improvement action concrete and immediately actionable.
-- Use the evidence field to explain both the weakness and the likely fix direction where possible.
+- Make each weakness string specific enough to explain both the technical gap and the likely fix direction.
 - Make architecture_review, implementation_review, and evaluation_review non-redundant.
 - Do not invent details that are not supported by the submission or retrieved context.
 - Do not criticise a desktop or single-user tool for lacking authentication unless the evidence clearly shows a multi-user, networked, or privileged-access requirement.
 QUALITY TARGET
 - The summary must identify what the submission is trying to build, the overall technical quality, and the most important gap.
-- When the evidence supports it, include at least 2 strengths, 2-3 issues, 2-3 improvement actions, and 3 checklist items.
-- CRITICAL: In every "evidence" field, name the specific component, module, feature, test, route, model, or omission from the submission that demonstrates the point. Never write an observation that could apply to any project.
-- Keep evidence concise and specific. One strong sentence is better than two generic ones.
+- When the evidence supports it, include at least 2 strengths, 2-3 weaknesses, 2-3 improvement actions, and 3 checklist items.
+- CRITICAL: Every strength and weakness string must name the specific component, module, feature, test, route, model, or omission from the submission that demonstrates the point. Never write an observation that could apply to any project.
+- Keep each strength and weakness concise and specific. One strong sentence is better than two generic ones.
 - Do not default every issue to low severity. Use the severity guidance above.
-- If the submission clearly describes a real system, do not leave strengths, issues, improvement_plan, and checklist all empty.
+- If the submission clearly describes a real system, do not leave strengths, weaknesses, improvements, and checklist all empty.
 {_student_content_floor("code")}
 FORBIDDEN - never write these without a specific explanation tied to the submission:
 - "improve the project" -> say what component needs changing and how
@@ -671,20 +766,20 @@ You are a senior academic assessor at a university with extensive experience eva
 Your task: produce detailed academic-style feedback on the student submission below. The feedback must be specific to this submission, not a generic template.
 {_JSON_RULES}
 {_STRICT_STUDENT_JSON_OUTPUT_RULES}
-You MUST return exactly one JSON object matching this schema:
-{json.dumps(schema, ensure_ascii=False, indent=2)}
+You MUST return exactly one JSON object using this compact local-model shape:
+{json.dumps(compact_schema, ensure_ascii=False, indent=2)}
+The service will expand this compact shape after parsing. Do not return the larger expanded schema.
 Extra constraints:
 - "summary" must be a plain string giving a concrete overview of the task, overall academic quality, and the main gap (2-4 sentences minimum).
-- "strengths" must be an array of objects with keys: title, evidence.
-- "issues" must be an array of objects with keys: title, evidence, severity.
-- "severity" must be exactly one of: "low", "med", "high".
-- "improvement_plan" must be an array of objects with keys: action, why, how, priority.
-- "priority" must be an integer from 1 to 10.
-- "checklist" must be an array of objects with keys: item, done.
-- "done" must be a boolean.
-- "model_agreement" values must be numbers between 0.0 and 1.0.
-- "confidence" must contain keys: mode, overall.
-- "safety" must contain keys: needs_review, reason.
+- "main_excerpt" may be used instead of "summary" when it helps you stay concise.
+- "strengths", "weaknesses", and "improvements" must be arrays of short specific strings.
+- "weaknesses" replaces "issues" and "improvements" replaces "improvement_plan".
+- Use 2-4 strengths, 2-4 weaknesses, 2-3 improvements, and exactly 3 checklist items when the evidence supports it.
+- Keep each strength, weakness, and checklist item to one short sentence.
+- "confidence_0_to_4" must be an integer from 0 to 4.
+- "safe_review" must be a boolean and "safety_reason" must be a short string.
+- Do not return nested issue objects, checklist objects, "confidence", "model_agreement", or extra keys.
+- Be concise and avoid repeating the same point across summary, strengths, weaknesses, and improvements.
 - No extra keys anywhere.
 - Restricted mode does not change the schema. The JSON shape must stay identical to normal mode.
 {_student_style_block("essay")}
@@ -707,15 +802,15 @@ Grounding rules:
 - Use the retrieved academic guidance when identifying issues and improvement actions.
 - Prefer evidence-backed advice over generic advice.
 - Do not quote or reference academic rules that are absent from the retrieved context.
-- The "evidence" field should refer to the submission content and may align with the retrieved guidance where relevant.
+- Strength and weakness strings should refer to the submission content and may align with the retrieved guidance where relevant.
 - Do not fabricate citations inside the JSON fields.
 - Keep the tone academic rather than technical-review oriented unless the submission itself is explicitly a software implementation report.
 - Do not use generic software-review language such as "implementation quality", "separation of concerns", or "authentication" for essay-style work unless the evidence clearly requires it.
 Output quality requirements:
 - Make the feedback specific to the actual submission, not a generic template.
 - The summary must identify what the submission is trying to do, the overall academic quality, and the most important gap.
-- When the evidence supports it, include at least 2 strengths, 2-3 issues, 2-3 improvement actions, and 3 checklist items.
-- Each "evidence" field should be 1-2 precise sentences: identify the specific problem, explain why it matters academically, and imply the revision direction.
+- When the evidence supports it, include at least 2 strengths, 2-3 weaknesses, 2-3 improvement actions, and 3 checklist items.
+- Each strength and weakness string should be 1-2 precise sentences: identify the specific point, explain why it matters academically, and imply the revision direction where relevant.
 - CRITICAL: In every "evidence" field, anchor the claim to the actual submission — name the specific paragraph, section, phrase, or passage that demonstrates the issue or strength. Never write an observation that could apply to any submission.
 - Keep checklist items short, practical, and directly actionable.
 - Do not grade the work or invent a rubric unless one is clearly grounded in the provided context.
@@ -978,9 +1073,9 @@ def fix_json_prompt(
     forced_needs_review: bool | None = None,
 ) -> str:
     if target == "student_project_review":
-        schema = _student_project_schema()
+        schema = _student_compact_project_schema()
     elif target == "student":
-        schema = _student_standard_schema()
+        schema = _student_compact_schema("academic review")
     else:
         schema = {
             "rubric_breakdown": [
@@ -1007,32 +1102,31 @@ def fix_json_prompt(
     if target == "student_project_review":
         extra_rules.extend(
             [
-                '- Return exactly these top-level keys: "summary", "issues", "strengths", "architecture_review", "implementation_review", "evaluation_review", "improvement_plan", "checklist", "confidence", "model_agreement", "safety".',
                 '- The response must start with { and end with }.',
                 '- Output JSON only with no markdown and no commentary.',
-                '- "architecture_review" must contain exactly: "overview", "backend", "frontend", "database", "security".',
-                '- "implementation_review" must contain exactly: "features_built", "technical_quality", "integration_quality".',
-                '- "evaluation_review" must contain exactly: "testing_present", "limitations", "academic_quality".',
-                '- "confidence" must contain exactly: "mode", "overall".',
-                '- "model_agreement" must contain exactly: "ml_confidence", "llm_confidence", "final_confidence".',
-                '- "safety" must contain exactly: "needs_review", "reason".',
-                '- Every issue severity must be exactly one of: "low", "med", "high".',
-                '- Keep the restricted-mode schema identical to normal mode; only values may change.',
-                '- Do not replace nested objects with strings.',
-                '- Use [] for empty arrays instead of omitting the field.',
+                '- Keep all existing meaning from the invalid JSON.',
+                '- Use this compact student schema only.',
+                '- "summary" must stay concrete and specific to the software/project submission.',
+                '- "confidence_0_to_4" must be an integer from 0 to 4.',
+                '- "safe_review" must be a boolean.',
+                '- "strengths", "weaknesses", "improvements", and "checklist" must be arrays of short strings.',
+                '- Keep 2-4 strengths, 2-4 weaknesses, 2-3 improvements, and 3 checklist items when possible.',
+                '- Keep architecture_review, implementation_review, and evaluation_review concise.',
             ]
         )
     elif target == "student":
         extra_rules.extend(
             [
-                '- Return exactly these top-level keys: "summary", "strengths", "issues", "improvement_plan", "checklist", "confidence", "model_agreement", "safety".',
                 '- The response must start with { and end with }.',
                 '- Output JSON only with no markdown and no commentary.',
-                '- Every issue severity must be exactly one of: "low", "med", "high".',
-                '- "confidence" must contain exactly: "mode", "overall".',
-                '- "model_agreement" must contain exactly: "ml_confidence", "llm_confidence", "final_confidence".',
-                '- "safety" must contain exactly: "needs_review", "reason".',
-                '- Use [] for empty arrays instead of omitting the field.',
+                '- Keep all existing meaning from the invalid JSON.',
+                '- Use this compact student schema only.',
+                '- "feedback_category" should stay academic and specific to the submission.',
+                '- "quality_band" must be one of: "low", "medium", "high".',
+                '- "confidence_0_to_4" must be an integer from 0 to 4.',
+                '- "confidence_label" must be one of: "low", "medium", "high".',
+                '- "safe_review" must be a boolean.',
+                '- "strengths", "weaknesses", and "improvements" must be arrays of strings.',
             ]
         )
     else:
@@ -1047,30 +1141,28 @@ def fix_json_prompt(
             f'- If the schema contains "confidence", then "confidence.mode" must be exactly "{forced_confidence_mode}".'
         )
     if forced_needs_review is not None:
-        extra_rules.append(
-            f'- "safety.needs_review" must be {str(bool(forced_needs_review)).lower()}.'
-        )
+        if target.startswith("student"):
+            extra_rules.append(
+                f'- "safe_review" must be {str(bool(forced_needs_review)).lower()}.'
+            )
+        else:
+            extra_rules.append(
+                f'- "safety.needs_review" must be {str(bool(forced_needs_review)).lower()}.'
+            )
 
     extra_rules_block = "\n".join(extra_rules)
+    rules_section = f"\nExtra rules:\n{extra_rules_block}" if extra_rules_block else ""
 
     return f"""
-Repair the following model output into valid JSON.
+Return valid JSON only. Keep all existing meaning. Do not add commentary.
 
-{_JSON_RULES}
+Target: {target}
 
-Target:
-{target}
+Schema:
+{json.dumps(schema, ensure_ascii=False, indent=2)}{rules_section}
 
-Return exactly one JSON object matching this schema:
-{json.dumps(schema, ensure_ascii=False, indent=2)}
+If a field is missing, use the smallest schema-valid value.
 
-Important:
-- Preserve the meaning of the original content as much as possible.
-- If a field is missing, fill it with a sensible minimal value.
-- Do not add markdown.
-- Do not add explanation text.
-{extra_rules_block}
-
-Broken output:
-{bad_output}
+Invalid JSON:
+{_clip_text(bad_output, 2500)}
 """.strip()

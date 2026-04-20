@@ -6,6 +6,7 @@ from typing import Any, Optional
 import httpx
 
 from app.core.config import settings
+from app.services.uuid_normalization import uuid_or_none
 
 
 def _require_supabase_config() -> None:
@@ -40,6 +41,10 @@ async def audit_log(
     If it fails, it should NOT break the main request.
     """
     try:
+        actor_user_id = uuid_or_none(actor_user_id)
+        if actor_user_id is None:
+            return
+
         payload = {
             "actor_user_id": actor_user_id,
             "action": action,

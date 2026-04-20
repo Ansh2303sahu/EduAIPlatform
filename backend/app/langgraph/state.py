@@ -49,6 +49,28 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _unit_float_or_none(value: Any) -> float | None:
+    try:
+        if value is None or value == "":
+            return None
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number < 0.0:
+        return None
+    return max(0.0, min(1.0, number))
+
+
+def _bucket_float_or_none(value: Any) -> float | None:
+    try:
+        if value is None or value == "":
+            return None
+        bucket = int(float(value))
+    except (TypeError, ValueError):
+        return None
+    return max(0.0, min(1.0, max(0, min(4, bucket)) / 4.0))
+
+
 def _default_analysis_type(role: str) -> AnalysisType:
     return (
         AnalysisType.STUDENT_ACADEMIC
@@ -213,8 +235,8 @@ class Phase12GraphState(BaseModel):
             submission_kind="academic",
             pipeline="phase12_langgraph",
             chain_name=graph_name,
-            execution_mode=ExecutionMode.NORMAL.value,
-            decision_source=DecisionSource.HYBRID.value,
+            execution_mode=ExecutionMode.NORMAL,
+            decision_source=DecisionSource.HYBRID,
         )
         context = PipelineContext(
             request_id=execution_id,
@@ -321,9 +343,46 @@ class Phase12GraphState(BaseModel):
         result = self.pipeline_context.ml_result
         if result is not None:
             return float(result.confidence_score)
-        raw_conf = self.pipeline_context.ml_raw.get("confidence_0_to_4")
-        if isinstance(raw_conf, (int, float)):
-            return max(0.0, min(1.0, float(raw_conf) / 4.0))
+        raw = self.pipeline_context.ml_raw or {}
+
+        for key in ("confidence_score", "confidence", "probability"):
+            score = _unit_float_or_none(raw.get(key))
+            if score is not None:
+                return score
+
+        bucket_score = _bucket_float_or_none(raw.get("confidence_0_to_4"))
+        if bucket_score is not None:
+            return bucket_score
+
+        raw_bundle = raw.get("raw") if isinstance(raw.get("raw"), dict) else {}
+        confidence_payload = (
+            raw_bundle.get("confidence")
+            if isinstance(raw_bundle.get("confidence"), dict)
+            else {}
+        )
+        confidence_prediction = (
+            confidence_payload.get("prediction")
+            if isinstance(confidence_payload.get("prediction"), dict)
+            else {}
+        )
+        score = _unit_float_or_none(confidence_prediction.get("confidence"))
+        if score is not None:
+            return score
+
+        predictions = raw_bundle.get("predictions") if isinstance(raw_bundle.get("predictions"), dict) else {}
+        head_scores = [
+            score
+            for prediction in predictions.values()
+            if isinstance(prediction, dict)
+            for score in [_unit_float_or_none(prediction.get("confidence"))]
+            if score is not None
+        ]
+        if head_scores:
+            return float(sum(head_scores) / len(head_scores))
+
+        consistency = str(raw.get("moderation_consistency") or "").strip().lower()
+        if consistency:
+            return {"high": 0.85, "med": 0.6, "medium": 0.6, "low": 0.3}.get(consistency, 0.6)
         return 0.0
 
     @computed_field
@@ -380,11 +439,39 @@ class Phase12GraphState(BaseModel):
     @property
     def final_confidence(self) -> float:
         report = self.pipeline_context.report
-        confidence = report.get("confidence", {})
-        overall = confidence.get("overall")
-        if isinstance(overall, (int, float)):
-            return max(0.0, min(1.0, float(overall)))
-        return float(self.pipeline_context.execution_meta.agreement_score)
+        if isinstance(report, dict):
+            confidence = report.get("confidence") if isinstance(report.get("confidence"), dict) else {}
+            agreement = (
+                report.get("model_agreement")
+                if isinstance(report.get("model_agreement"), dict)
+                else {}
+            )
+            saw_zero_confidence = False
+            for value in (
+                agreement.get("final_confidence"),
+                confidence.get("overall"),
+                confidence.get("score"),
+                report.get("confidence_score"),
+                agreement.get("llm_confidence"),
+                agreement.get("ml_confidence"),
+            ):
+                score = _unit_float_or_none(value)
+                if score is not None and score > 0.0:
+                    return score
+                saw_zero_confidence = saw_zero_confidence or score == 0.0
+            if saw_zero_confidence:
+                return 0.0
+
+        meta_score = _unit_float_or_none(self.pipeline_context.execution_meta.agreement_score)
+        if meta_score is not None and meta_score > 0.0:
+            return meta_score
+
+        ml_score = _unit_float_or_none(self.ml_confidence)
+        if ml_score is not None and ml_score > 0.0:
+            return ml_score
+
+        evidence_score = _unit_float_or_none(self.evidence_quality_score)
+        return evidence_score if evidence_score is not None else 0.0
 
     @computed_field
     @property

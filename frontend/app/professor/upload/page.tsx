@@ -282,7 +282,7 @@ export default function ProfessorUploadPage() {
         setProgressNote("Generating professor AI report...");
 
         const genRes = await fetchWithAuth(
-          backendUrl("/phase7/professor/generate"),
+          backendUrl("/ai/generate/professor-report"),
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },

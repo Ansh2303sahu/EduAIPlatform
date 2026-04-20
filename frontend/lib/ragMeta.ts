@@ -57,6 +57,15 @@ export type RagMeta = {
 };
 
 type RagCarrier = {
+  rag_meta?: {
+    enabled?: boolean | null;
+    confidence_score?: number | null;
+    confidence_label?: string | null;
+    safe_review?: boolean | null;
+    citations?: RagCitation[] | null;
+    retrieved_chunks?: RagRetrievedChunk[] | null;
+    trace?: RagTrace | null;
+  } | null;
   citations?: RagCitation[] | null;
   retrieved_chunks?: RagRetrievedChunk[] | null;
   rag_trace?: RagTrace | null;
@@ -94,7 +103,7 @@ function hasMeaningfulTrace(trace?: RagTrace | null) {
 export function buildRenderableRagMeta(item?: RagCarrier | null): RagMeta | null {
   if (!item) return null;
 
-  const nested = item.report_json?.rag_meta || null;
+  const nested = item.report_json?.rag_meta || item.rag_meta || null;
   const citations = nonEmptyArray(item.citations).length > 0
     ? nonEmptyArray(item.citations)
     : nonEmptyArray(nested?.citations);

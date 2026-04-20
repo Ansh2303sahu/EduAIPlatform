@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from app.genai.config import genai_settings
 from app.genai.deterministic import build_professor_report, build_student_report
 from app.genai.prompts import build_generator_prompt
 from app.langgraph.schemas import Phase12NodeDescriptor
@@ -26,7 +27,7 @@ async def generator_node(state: Phase12GraphState) -> Phase12GraphState:
     state.set_current_node(NODE_NAME)
     prompt_text = build_generator_prompt(state)
     state.prompt_hash = support.sha256_json(
-        {"role": state.role, "prompt_version": "phase15_16.v1", "prompt_text": prompt_text}
+        {"role": state.role, "prompt_version": genai_settings.prompt_version, "prompt_text": prompt_text}
     )
     parsed, model_name, error = await invoke_json_prompt(
         role=state.role,

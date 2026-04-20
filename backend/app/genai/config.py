@@ -3,9 +3,17 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_BACKEND_ROOT = Path(__file__).resolve().parents[2]
+_ENV_FILES = tuple(
+    str(path)
+    for path in (_BACKEND_ROOT / ".env",)
+    if path.exists()
+)
 
 
 class GenAISettings(BaseSettings):
@@ -13,15 +21,17 @@ class GenAISettings(BaseSettings):
 
     model_config = SettingsConfigDict(
         env_prefix="GENAI_",
+        env_file=_ENV_FILES,
+        env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
     )
 
     enabled: bool = Field(default=True)
-    primary_model: str = Field(default="mistral:latest")
-    validator_model: str = Field(default="phi3:latest")
+    primary_model: str = Field(default="gemma3:4b")
+    validator_model: str = Field(default="phi3:mini")
     graph_version: str = Field(default="15.16.0")
-    prompt_version: str = Field(default="phase15_16.v1")
+    prompt_version: str = Field(default="phase15_16.v2")
     output_version: str = Field(default="phase15_16.output.v1")
     schema_version: str = Field(default="phase15_16.schema.v1")
     pipeline_label: str = Field(default="phase15_phase16_genai")

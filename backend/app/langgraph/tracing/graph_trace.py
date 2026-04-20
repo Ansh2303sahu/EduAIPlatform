@@ -37,6 +37,8 @@ class TraceNodeStatus(str, Enum):
 class GraphExecutionTraceMetadata(BaseModel):
     """Top-level execution metadata for a Phase 12 graph run."""
 
+    model_config = {"protected_namespaces": ()}
+
     execution_id: str
     graph_name: str
     graph_version: str

@@ -10,7 +10,9 @@ The emit is fire-and-forget — failures are logged but never fail the pipeline.
 """
 
 import logging
+import time
 
+from app.langchain.config import phase10_settings
 from app.langchain.prompts.professor import build_professor_prompt, build_professor_safe_prompt
 from app.langchain.prompts.student import build_student_prompt, build_student_safe_prompt
 from app.langchain.services.chain_factory import build_generation_chain, get_primary_model
@@ -75,7 +77,7 @@ async def _emit_assessment_requested(state: Phase12GraphState) -> None:
         # Build minimal payload — no raw text or PII beyond IDs
         payload = AssessmentRequestedPayload(
             file_id=state.pipeline_context.file_id,
-            user_id=state.pipeline_context.user_id,
+            user_id=state.user_id,
             role=role,
             submission_id=getattr(state.pipeline_context, "submission_id", ""),
             draft_confidence=float(
@@ -127,15 +129,37 @@ async def _emit_assessment_requested(state: Phase12GraphState) -> None:
 async def run(state: Phase12GraphState) -> Phase12GraphState:
     """Generate raw model output through the current Phase 10 generation stack."""
 
+    t0 = time.perf_counter()
+    meta = state.pipeline_context.execution_meta
+    meta.provider = phase10_settings.provider
+    meta.primary_model = phase10_settings.llm_primary_label
+    meta.fallback_model = phase10_settings.llm_fallback_label
+    meta.chain_name = meta.chain_name or f"phase10_{state.role}_generation"
+    meta.chain_version = phase10_settings.chain_version
+    meta.student_prompt_version = phase10_settings.student_prompt_version
+    meta.professor_prompt_version = phase10_settings.professor_prompt_version
+    meta.schema_version = phase10_settings.schema_version
+    meta.analysis_type = state.pipeline_context.analysis_type.value
+    meta.submission_kind = state.pipeline_context.submission_kind
+
     prompt_text = _build_prompt(state)
     state.pipeline_context.prompt_text = prompt_text
-    state.prompt_hash = report_support.sha256_json(
+    content_hash = report_support.sha256_json(
         {
             "role": state.role,
             "analysis_type": state.pipeline_context.analysis_type.value,
             "prompt_text": prompt_text,
         }
     )
+    if not state.prompt_hash:
+        state.prompt_hash = content_hash
+    meta.prompt_debug = {
+        "content_hash": content_hash,
+        "prompt_chars": len(prompt_text),
+        "retrieval_context_chars": len(
+            state.pipeline_context.rag.context or state.pipeline_context.rag.context_text or ""
+        ),
+    }
     primary_model = get_primary_model(role=state.role)
     primary_chain = build_generation_chain(primary_model)
     raw_text, model_used = await run_with_fallback(
@@ -147,7 +171,8 @@ async def run(state: Phase12GraphState) -> Phase12GraphState:
     state.pipeline_context.raw_llm_output = raw_text
     state.pipeline_context.model_used = model_used
     state.pipeline_context.execution_meta.model_used = model_used
-    state.pipeline_context.execution_meta.fallback_used = model_used != primary_model
+    state.pipeline_context.execution_meta.fallback_used = model_used != phase10_settings.llm_primary_label
+    state.pipeline_context.timings_ms["llm_service"] = int((time.perf_counter() - t0) * 1000)
     record_event(
         state,
         NODE_NAME,

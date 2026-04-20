@@ -8,7 +8,14 @@ from io import BytesIO
 
 from app.core.deps import CurrentUser, get_current_user
 from app.genai.service import GenAIService
-from app.genai.schemas import AIReportGenerateIn, AIReportResponse, AuditResponse, CompareResponse, ExplainResponse
+from app.genai.schemas import (
+    AICheckResponse,
+    AIReportGenerateIn,
+    AIReportResponse,
+    AuditResponse,
+    CompareResponse,
+    ExplainResponse,
+)
 
 router = APIRouter(prefix="/ai", tags=["ai"])
 _service = GenAIService()
@@ -80,6 +87,18 @@ async def audit_report(
     if resolved == "professor":
         _require_role(user, "professor", "admin")
     return await _service.audit(file_id=file_id, role=resolved, user=user, include_pdf=include_pdf)
+
+
+@router.get("/check/{file_id}", response_model=AICheckResponse)
+async def ai_check(
+    file_id: str,
+    role: str | None = Query(default=None),
+    user: CurrentUser = Depends(get_current_user),
+):
+    resolved = _resolve_role(user, role)
+    if resolved == "professor":
+        _require_role(user, "professor", "admin")
+    return await _service.check(file_id=file_id, role=resolved, user=user)
 
 
 @router.get("/pdf/{file_id}")

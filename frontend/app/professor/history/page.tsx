@@ -13,8 +13,10 @@ import {
   ShieldAlert,
   Sparkles,
 } from "lucide-react";
+import AICheckPanel from "@/components/ai/AICheckPanel";
 import { backendUrl } from "@/lib/backendUrl";
 import { fetchJsonWithAuth } from "@/lib/fetchWithAuth";
+import { summarizeForCard } from "@/lib/reportSummary";
 
 type HistoryItem = {
   id: string;
@@ -89,6 +91,7 @@ function confidenceBand(n?: number) {
 
 export default function ProfessorHistoryPage() {
   const [items, setItems] = useState<HistoryItem[]>([]);
+  const [selectedFileId, setSelectedFileId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
 
@@ -117,6 +120,16 @@ export default function ProfessorHistoryPage() {
     void loadHistory();
   }, []);
 
+  useEffect(() => {
+    if (!items.length) {
+      setSelectedFileId(null);
+      return;
+    }
+    if (!selectedFileId || !items.some((item) => item.file_id === selectedFileId)) {
+      setSelectedFileId(items[0].file_id);
+    }
+  }, [items, selectedFileId]);
+
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
 
@@ -126,7 +139,7 @@ export default function ProfessorHistoryPage() {
         x.id,
         x.model_versions?.llm_model_used,
         x.model_versions?.llm_primary,
-        x.report_json?.feedback_explanation,
+        summarizeForCard("professor", x.report_json, 320),
       ]
         .filter(Boolean)
         .join(" ")
@@ -254,6 +267,14 @@ export default function ProfessorHistoryPage() {
         </div>
       ) : null}
 
+      {selectedFileId ? (
+        <AICheckPanel fileId={selectedFileId} role="professor" />
+      ) : (
+        <section className="rounded-[30px] border border-dashed border-white/10 bg-white/[0.04] p-6 text-sm text-slate-400 shadow-[0_20px_70px_rgba(0,0,0,0.18)] backdrop-blur-xl">
+          Select or generate a professor report to inspect LangChain, LangGraph, GenAI, MCP, and n8n results here.
+        </section>
+      )}
+
       <section className="rounded-[30px] border border-white/10 bg-white/[0.05] p-5 shadow-[0_20px_70px_rgba(0,0,0,0.22)] backdrop-blur-xl">
         <div className="mb-5 text-lg font-black text-white">Professor reports</div>
 
@@ -306,13 +327,10 @@ export default function ProfessorHistoryPage() {
                   <div className="mt-5 grid gap-4 xl:grid-cols-2">
                     <div>
                       <div className="mb-2 text-xs font-extrabold uppercase tracking-[0.16em] text-slate-400">
-                        Feedback explanation
+                        Report summary
                       </div>
                       <div className="text-sm leading-6 text-slate-300">
-                        {x.report_json?.feedback_explanation
-                          ? x.report_json.feedback_explanation.slice(0, 220) +
-                            (x.report_json.feedback_explanation.length > 220 ? "..." : "")
-                          : "—"}
+                        {summarizeForCard("professor", x.report_json, 220)}
                       </div>
                     </div>
 
@@ -342,6 +360,18 @@ export default function ProfessorHistoryPage() {
                   </div>
 
                   <div className="mt-5 flex flex-wrap items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={() => setSelectedFileId(x.file_id)}
+                      className={`rounded-2xl border px-4 py-2.5 text-sm font-bold transition ${
+                        selectedFileId === x.file_id
+                          ? "border-emerald-300/20 bg-emerald-400/10 text-emerald-100"
+                          : "border-white/10 bg-white/10 text-white hover:bg-white/15"
+                      }`}
+                    >
+                      {selectedFileId === x.file_id ? "Showing AI check" : "AI Check"}
+                    </button>
+
                     <Link
                       href={`/professor/results/${x.file_id}`}
                       className="inline-flex items-center rounded-2xl bg-gradient-to-r from-blue-500 to-indigo-500 px-4 py-2.5 text-sm font-bold text-white shadow-[0_12px_28px_rgba(59,130,246,0.28)] transition hover:scale-[1.01]"

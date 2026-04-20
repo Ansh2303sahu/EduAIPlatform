@@ -15,12 +15,14 @@ from pydantic import BaseModel, Field, ValidationError
 
 from app.core.config import settings
 from app.core.deps import CurrentUser, get_current_user
+from app.langchain.config import phase10_settings
 from app.rag.payloads import inject_rag_fields
 from app.rag.retrieval.context_builder import (
     build_professor_rag_payload,
     build_student_rag_payload,
 )
 from app.rag.store import build_storage_fields_from_rag_meta
+from app.services.phase7_graph_service import Phase7GraphService
 from app.services.report_generation_support import (
     build_ingestion_bundle as _shared_build_ingestion_bundle,
     call_ai_professor_multimodal as _shared_call_ai_professor_multimodal,
@@ -33,9 +35,11 @@ from app.services.report_generation_support import (
     rate_limit as _shared_rate_limit,
     sha256_json as _shared_sha256_json,
 )
+from app.services.report_richness import report_low_content_quality, report_richness_score
 
 router = APIRouter(prefix="/phase7", tags=["phase7"])
 logger = logging.getLogger("phase7")
+_graph_service = Phase7GraphService()
 
 Severity = Literal["low", "med", "high"]
 
@@ -334,6 +338,9 @@ def _student_report_low_content_quality(report: dict[str, Any] | None) -> bool:
     if not data:
         return False
 
+    if report_low_content_quality("student", data):
+        return True
+
     safety = _phase7_as_dict(data.get("safety"))
     if _phase7_marker_text(safety.get("reason")) == _LOW_CONTENT_QUALITY_REASON:
         return True
@@ -412,10 +419,78 @@ def _student_row_is_degraded_placeholder(row: dict[str, Any] | None) -> bool:
 def _select_latest_student_row(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
     if not rows:
         return None
+    best_row = rows[0]
+    best_key = (-1, -1.0, -1)
     for row in rows:
-        if not _student_row_is_degraded_placeholder(row):
-            return row
-    return rows[0]
+        report = _phase7_as_dict(row.get("report_json"))
+        confidence = _phase7_float(
+            _phase7_as_dict(row.get("model_versions")).get("agreement", {}).get("final_confidence")
+            if isinstance(_phase7_as_dict(row.get("model_versions")).get("agreement"), dict)
+            else _phase7_as_dict(_phase7_as_dict(report).get("model_agreement")).get("final_confidence"),
+            default=0.0,
+        )
+        degraded = _student_row_is_degraded_placeholder(row)
+        needs_review = _phase7_bool(row.get("needs_review"), default=False) or _phase7_bool(
+            _phase7_as_dict(report.get("safety")).get("needs_review"),
+            default=False,
+        )
+        richness = report_richness_score("student", report)
+        key = (
+            0 if degraded else 1,
+            0 if needs_review and confidence < 0.45 else 1,
+            confidence,
+            richness,
+        )
+        if key > best_key:
+            best_key = key
+            best_row = row
+    return best_row
+
+
+def _professor_row_sort_key(row: dict[str, Any]) -> tuple[int, int, float, int]:
+    report = _phase7_as_dict(row.get("report_json"))
+    confidence = _phase7_float(
+        _phase7_as_dict(_phase7_as_dict(row.get("model_versions")).get("agreement")).get("final_confidence"),
+        default=0.0,
+    )
+    needs_review = _phase7_bool(row.get("needs_review"), default=False) or _phase7_bool(
+        _phase7_as_dict(report.get("safety")).get("needs_review"),
+        default=False,
+    )
+    degraded = report_low_content_quality("professor", report)
+    richness = report_richness_score("professor", report)
+    return (
+        0 if degraded else 1,
+        0 if needs_review and confidence < 0.45 else 1,
+        confidence,
+        richness,
+    )
+
+
+def _select_latest_professor_row_with_metadata(
+    rows: list[dict[str, Any]],
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    total = len(rows)
+    if total == 0:
+        return None, {
+            "preferred_non_degraded": False,
+            "preferred_richer_report": False,
+            "total_reports_considered": 0,
+        }
+
+    selected = max(rows, key=_professor_row_sort_key)
+    latest_row = rows[0]
+    return selected, {
+        "preferred_non_degraded": bool(
+            selected is not latest_row and not report_low_content_quality("professor", _phase7_as_dict(selected.get("report_json")))
+        ),
+        "preferred_richer_report": bool(
+            selected is not latest_row
+            and report_richness_score("professor", _phase7_as_dict(selected.get("report_json")))
+            > report_richness_score("professor", _phase7_as_dict(latest_row.get("report_json")))
+        ),
+        "total_reports_considered": total,
+    }
 
 
 def _select_latest_student_row_with_metadata(
@@ -610,6 +685,22 @@ def _sha256_json(obj: Any) -> str:
     return _shared_sha256_json(obj)
 
 
+def _uuid_or_none(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, uuid.UUID):
+        return str(value)
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if not cleaned:
+            return None
+        try:
+            return str(uuid.UUID(cleaned))
+        except ValueError:
+            return None
+    return None
+
+
 def _map_quality_band_from_confidence(c04: int) -> str:
     if c04 <= 1:
         return "low"
@@ -688,9 +779,51 @@ _PROJECT_HINT_TERMS = {
     "testing",
 }
 
+_ACADEMIC_HINT_TERMS = {
+    "argument",
+    "evidence",
+    "critical analysis",
+    "clarity",
+    "referencing",
+    "citation",
+    "citations",
+    "harvard",
+    "apa",
+    "mla",
+    "bibliography",
+    "thesis",
+    "literature review",
+    "methodology",
+    "conclusion",
+    "discussion",
+    "governance",
+    "policy",
+    "risk assessment",
+    "nist",
+    "stride",
+    "gdpr",
+}
+
 
 def _detect_submission_kind(ingestion: dict[str, Any]) -> str:
     return _shared_detect_submission_kind(ingestion)
+
+
+def _query_anchor_terms(text: str, *, base: str, limit: int = 6) -> list[str]:
+    lowered = text.lower()
+    hint_pool = (
+        _PROJECT_HINT_TERMS
+        if any(token in base.lower() for token in ("software", "backend", "frontend", "database", "testing"))
+        else _ACADEMIC_HINT_TERMS
+    )
+    matched: list[str] = []
+    for term in sorted(hint_pool, key=lambda value: (-len(value.split()), -len(value), value)):
+        if term not in lowered:
+            continue
+        matched.append(term)
+        if len(matched) >= limit:
+            break
+    return matched
 
 
 def _submission_focused_query(ingestion: dict[str, Any], base: str, limit: int = 200) -> str:
@@ -707,8 +840,11 @@ def _submission_focused_query(ingestion: dict[str, Any], base: str, limit: int =
         return base
     # Use only the first 200 chars as the primary anchor — long excerpts get
     # silently clipped to 320 chars in query_builder and lose submission signal.
-    excerpt = text[:limit]
-    return excerpt
+    excerpt = text[: max(limit * 2, 420)]
+    anchor_terms = _query_anchor_terms(excerpt, base=base)
+    if not anchor_terms:
+        return base
+    return _normalized_excerpt(f"{' '.join(anchor_terms)} {base}", limit=240)
 
 
 def _student_project_query(ingestion: dict[str, Any]) -> str:
@@ -792,6 +928,7 @@ def _as_issue_object(item: Any) -> dict[str, Any] | None:
     title = str(
         item.get("title")
         or item.get("issue")
+        or item.get("weakness")
         or item.get("label")
         or item.get("text")
         or ""
@@ -866,18 +1003,24 @@ def _as_improvement_object(item: Any, index: int) -> dict[str, Any] | None:
         or item.get("text")
         or ""
     ).strip()
-    why = str(item.get("why") or item.get("reason") or "").strip()
+    why = str(item.get("why") or item.get("reason") or item.get("rationale") or "").strip()
     how = str(item.get("how") or item.get("details") or "").strip()
-    priority = item.get("priority")
-    if not isinstance(priority, int):
-        priority = index + 1
+    if not how:
+        steps = [
+            str(step).strip()
+            for step in _phase7_as_list(item.get("steps"))
+            if str(step).strip()
+        ]
+        if steps:
+            how = "; ".join(steps)
+    priority = _student_priority_rank(item.get("priority"), index)
     if not action and not why and not how:
         return None
     return {
         "action": action or "Suggested improvement",
         "why": why or "The reason was not provided.",
         "how": how or "The implementation detail was not provided.",
-        "priority": _phase7_int(priority, default=index + 1),
+        "priority": priority,
     }
 
 
@@ -892,8 +1035,10 @@ def _as_checklist_object(item: Any) -> dict[str, Any] | None:
 
     text = str(
         item.get("item")
+        or item.get("action")
         or item.get("label")
         or item.get("title")
+        or item.get("objective")
         or item.get("text")
         or ""
     ).strip()
@@ -911,6 +1056,82 @@ def _normalize_confidence_mode(value: Any, *, restricted: bool) -> str:
     return "restricted" if str(value or "").strip().lower() == "restricted" else "normal"
 
 
+def _student_priority_rank(value: Any, index: int) -> int:
+    if isinstance(value, str):
+        mapped = {
+            "high": 1,
+            "medium": 2,
+            "med": 2,
+            "low": 3,
+        }.get(value.strip().lower())
+        if mapped is not None:
+            return mapped
+    return _phase7_int(value, default=index + 1)
+
+
+def _student_improvement_source(data: dict[str, Any]) -> list[Any]:
+    improvement_plan = _phase7_as_dict(data.get("improvement_plan"))
+    actions = _phase7_as_list(improvement_plan.get("actions"))
+    if actions:
+        return actions
+
+    for key in ("improvement_plan", "suggestions", "recommendations", "next_steps"):
+        if key == "improvement_plan" and isinstance(data.get(key), dict):
+            continue
+        items = _phase7_as_list(data.get(key))
+        if items:
+            return items
+
+    return []
+
+
+def _student_checklist_source(data: dict[str, Any]) -> list[Any]:
+    checklist = _phase7_as_list(data.get("checklist"))
+    if checklist:
+        return checklist
+
+    learning_path = _phase7_as_dict(data.get("learning_path"))
+    generated: list[Any] = []
+
+    for item in _phase7_as_list(learning_path.get("recommended_practice")):
+        if str(item or "").strip():
+            generated.append(item)
+
+    for milestone in _phase7_as_list(learning_path.get("milestones")):
+        if isinstance(milestone, str):
+            text = milestone.strip()
+            if text:
+                generated.append(text)
+            continue
+        if not isinstance(milestone, dict):
+            continue
+        title = str(milestone.get("title") or milestone.get("objective") or "").strip()
+        if title:
+            generated.append({"item": title, "done": False})
+        for activity in _phase7_as_list(milestone.get("activities")):
+            if str(activity or "").strip():
+                generated.append(activity)
+
+    if generated:
+        return generated
+
+    for item in _student_improvement_source(data):
+        if isinstance(item, dict):
+            text = str(
+                item.get("action")
+                or item.get("title")
+                or item.get("item")
+                or item.get("step")
+                or ""
+            ).strip()
+            if text:
+                generated.append(text)
+        elif str(item or "").strip():
+            generated.append(item)
+
+    return generated
+
+
 def _canonical_student_report(report: dict[str, Any] | None, *, restricted: bool) -> dict[str, Any]:
     data = report if isinstance(report, dict) else {}
     summary = data.get("summary")
@@ -920,9 +1141,10 @@ def _canonical_student_report(report: dict[str, Any] | None, *, restricted: bool
     ):
         summary = "The submission triggered safety or confidence checks, so the system returned limited feedback for manual review."
 
+    issues_source = _phase7_as_list(data.get("issues")) or _phase7_as_list(data.get("weaknesses"))
     issues = [
         converted
-        for item in _phase7_as_list(data.get("issues"))
+        for item in issues_source
         if (converted := _as_issue_object(item)) is not None
     ]
     strengths = [
@@ -932,12 +1154,12 @@ def _canonical_student_report(report: dict[str, Any] | None, *, restricted: bool
     ]
     plan = [
         converted
-        for idx, item in enumerate(_phase7_as_list(data.get("improvement_plan")))
+        for idx, item in enumerate(_student_improvement_source(data))
         if (converted := _as_improvement_object(item, idx)) is not None
     ]
     checklist = [
         converted
-        for item in _phase7_as_list(data.get("checklist"))
+        for item in _student_checklist_source(data)
         if (converted := _as_checklist_object(item)) is not None
     ]
 
@@ -949,9 +1171,14 @@ def _canonical_student_report(report: dict[str, Any] | None, *, restricted: bool
     safety = _phase7_as_dict(data.get("safety"))
 
     final_confidence = _phase7_float(model_agreement.get("final_confidence"), default=-1.0)
+    confidence_score = _phase7_float(confidence.get("score"), default=-1.0)
     overall = _phase7_float(confidence.get("overall"), default=-1.0)
     if overall < 0.0:
-        overall = final_confidence if final_confidence >= 0.0 else (0.35 if restricted else 0.75)
+        overall = (
+            final_confidence
+            if final_confidence >= 0.0
+            else (confidence_score if confidence_score >= 0.0 else (0.35 if restricted else 0.75))
+        )
 
     return {
         "summary": _phase7_text(summary, "Automated review generated with limited confidence.", limit=1200),
@@ -1002,8 +1229,14 @@ def _canonical_student_report(report: dict[str, Any] | None, *, restricted: bool
         },
         "model_agreement": {
             "ml_confidence": _phase7_float(model_agreement.get("ml_confidence"), default=0.0),
-            "llm_confidence": _phase7_float(model_agreement.get("llm_confidence"), default=0.0),
-            "final_confidence": _phase7_float(model_agreement.get("final_confidence"), default=0.0),
+            "llm_confidence": _phase7_float(
+                model_agreement.get("llm_confidence"),
+                default=(overall if overall >= 0.0 else 0.0),
+            ),
+            "final_confidence": _phase7_float(
+                model_agreement.get("final_confidence"),
+                default=(overall if overall >= 0.0 else 0.0),
+            ),
         },
         "safety": {
             "needs_review": _phase7_bool(safety.get("needs_review"), default=restricted),
@@ -1193,6 +1426,8 @@ def _normalize_rag_fields(row: dict[str, Any], *, nested_rag: dict[str, Any] | N
             if isinstance(report, dict) and isinstance(report.get("rag_meta"), dict)
             else {}
         )
+    if not nested_rag and isinstance(normalized.get("rag_meta"), dict):
+        nested_rag = normalized.get("rag_meta") or {}
 
     if not nested_rag:
         return normalized
@@ -1340,10 +1575,9 @@ async def latest(role: str, file_id: str, user: CurrentUser = Depends(get_curren
         )
     else:
         rows = await _get_rows(
-            f"ai_reports?file_id=eq.{file_id}&role=eq.{role}&select=*&order=created_at.desc&limit=1"
+            f"ai_reports?file_id=eq.{file_id}&role=eq.{role}&select=*&order=created_at.desc"
         )
-        selected = rows[0] if rows else None
-        selection_metadata = None
+        selected, selection_metadata = _select_latest_professor_row_with_metadata(rows)
 
     item = _normalize_report_row(role, selected) if selected else None
     response = {"found": bool(rows), "item": item}
@@ -1360,31 +1594,25 @@ async def generate_student(body: GenerateIn, user: CurrentUser = Depends(get_cur
         raise HTTPException(status_code=403, detail="Student access required")
 
     request_id = str(uuid.uuid4())
-    t_all = time.perf_counter()
-
     file_row = await _load_file(body.file_id, user)
-
-    t0 = time.perf_counter()
     ingestion = await _build_ingestion_bundle(body.file_id, user)
-    ingestion_ms = int((time.perf_counter() - t0) * 1000)
-
     input_hash = _sha256_json(ingestion)
     submission_kind = _detect_submission_kind(ingestion)
     analysis_type = "student_project_review" if submission_kind == "project" else "student_academic_review"
-    top_k = 6 if submission_kind == "project" else 5
     prompt_hash = _sha256_json(
         {
             "role": "student",
-            "template": "student_review_v5",
+            "pipeline": "phase12_langgraph",
+            "graph_name": "phase12_student_graph",
+            "graph_version": phase10_settings.chain_version,
+            "chain_name": "phase10_student_generation",
             "analysis_type": analysis_type,
-            "query_strategy": f"{submission_kind}_specific_v2",
+            "prompt_version": phase10_settings.student_prompt_version,
+            "schema_version": phase10_settings.schema_version,
             "rag_enabled": settings.rag_enabled,
-            "top_k": top_k,
+            "primary_model": settings.llm_primary_label,
+            "fallback_model": settings.llm_fallback_label,
         }
-    )
-
-    injected = _detect_injection(
-        (ingestion.get("text_content") or "") + " " + (ingestion.get("audio_transcript") or "")
     )
 
     if not body.force:
@@ -1400,140 +1628,30 @@ async def generate_student(body: GenerateIn, user: CurrentUser = Depends(get_cur
                 "stored": _normalize_report_row("student", existing[0]),
             }
 
-    t1 = time.perf_counter()
-    ml = await _call_ai_student_multimodal(user, ingestion)
-    ai_ms = int((time.perf_counter() - t1) * 1000)
-
-    rag_meta: dict[str, Any] = {}
-    low_confidence = int(ml.get("confidence_0_to_4", 2)) <= 0
-    mode = "restricted" if injected or low_confidence else "normal"
-    student_query = (
-        _student_project_query(ingestion)
-        if submission_kind == "project"
-        else _student_academic_query(ingestion)
+    final_state = await _graph_service.run_generation(
+        role="student",
+        file_id=body.file_id,
+        user=user,
+        file_row=file_row,
+        ingestion_dict=ingestion,
+        input_hash=input_hash,
+        prompt_hash=prompt_hash,
     )
+    report = final_state.pipeline_context.report
+    rag_meta = final_state.pipeline_context.rag.model_dump(mode="json")
+    ml = dict(final_state.pipeline_context.ml_raw or {})
+    saved = final_state.storage_payload.get("stored_row")
 
-    llm_payload = {
-        "submission_id": str(file_row.get("submission_id") or ""),
-        "ingestion": ingestion,
-        "ml": {
-            "feedback_category": ml["feedback_category"],
-            "quality_band": ml["quality_band"],
-            "confidence_0_to_4": ml["confidence_0_to_4"],
-        },
-        "query": student_query,
-        "top_k": top_k,
-        "mode": mode,
-        "analysis_type": analysis_type,
-        "analysis_focus": (
-            [
-                "project aim",
-                "technical stack",
-                "architecture",
-                "implementation quality",
-                "security",
-                "testing",
-                "limitations",
-            ]
-            if submission_kind == "project"
-            else [
-                "task response",
-                "structure",
-                "evidence",
-                "critical analysis",
-                "clarity",
-                "referencing",
-                "academic quality",
-            ]
-        ),
-        "submission_type": submission_kind,
-        "safety_flags": {
-            "injection_detected": injected,
-            "low_confidence": low_confidence,
-        },
-    }
-
-    if settings.rag_enabled:
-        student_rag_payload = build_student_rag_payload(llm_payload)
-        logger.info(
-            "student_generate rag summary file_id=%s mode=%s query=%r top_k=%s summary=%s",
-            body.file_id,
-            mode,
-            student_query,
-            llm_payload.get("top_k"),
-            _rag_log_summary(student_rag_payload),
-        )
-        llm_payload = inject_rag_fields(llm_payload, student_rag_payload)
-    else:
-        logger.info(
-            "student_generate rag disabled file_id=%s mode=%s query=%r top_k=%s",
-            body.file_id,
-            mode,
-            student_query,
-            llm_payload.get("top_k"),
-        )
-
-    t2 = time.perf_counter()
-    llm_response, llm_model_used, llm_meta = await _call_llm("/llm/student/report", llm_payload)
-    llm_ms = int((time.perf_counter() - t2) * 1000)
-
-    rag_meta = _extract_rag_meta(llm_response)
-    report, llm_ok = _validate_student_report_for_storage(
-        _report_without_rag_meta(llm_response),
-        restricted=(mode == "restricted"),
-        ml=ml,
-        reason="The LLM output did not match the expected student report schema.",
-    )
-    degraded_placeholder = _student_report_low_content_quality(report)
-
-    total_ms = int((time.perf_counter() - t_all) * 1000)
-    agreement = _agreement_score_student(int(ml["confidence_0_to_4"]), injected, llm_ok)
-
-    saved = await _post_row(
-        "ai_reports",
-        {
-            "file_id": body.file_id,
-            "submission_id": file_row.get("submission_id"),
-            "role": "student",
-            "report_json": report,
-            "report_hash": _sha256_json(report),
-            "prompt_hash": prompt_hash,
-            "input_hash": input_hash,
-            "model_versions": {
-                "request_id": request_id,
-                "timings_ms": {
-                    "ingestion": ingestion_ms,
-                    "ai_service": ai_ms,
-                    "llm_service": llm_ms,
-                    "total": total_ms,
-                },
-                "llm_primary": llm_meta.get("primary_model") or settings.llm_primary_label,
-                "llm_fallback": llm_meta.get("fallback_model") or settings.llm_fallback_label,
-                "llm_model_used": llm_model_used or "unknown",
-                "ml_models": {
-                    "feedback": "student.feedback_classifier_multimodal.v1",
-                    "confidence": "student.confidence_model_multimodal.v1",
-                },
-                "agreement": {
-                    "final_confidence": agreement,
-                    "ml_bucket_0_to_4": ml["confidence_0_to_4"],
-                    "injected": injected,
-                },
-                "quality_gate": {
-                    "degraded_placeholder": degraded_placeholder,
-                    "reason": _LOW_CONTENT_QUALITY_REASON if degraded_placeholder else "",
-                },
-            },
-            **build_storage_fields_from_rag_meta(rag_meta),
-            "needs_review": bool((report.get("safety") or {}).get("needs_review", False))
-            or injected
-            or bool(rag_meta.get("safe_review", False)),
-        },
+    logger.info(
+        "student ai_reports graph complete file_id=%s request_id=%s final_status=%s",
+        body.file_id,
+        final_state.pipeline_context.request_id,
+        final_state.final_status.value if final_state.final_status else final_state.status.value,
     )
 
     return {
         "cached": False,
-        "request_id": request_id,
+        "request_id": final_state.pipeline_context.request_id,
         "ml": ml,
         "report": report,
         "rag_meta": rag_meta,
@@ -1549,31 +1667,25 @@ async def generate_professor(body: GenerateIn, user: CurrentUser = Depends(get_c
         raise HTTPException(status_code=403, detail="Professor access required")
 
     request_id = str(uuid.uuid4())
-    t_all = time.perf_counter()
-
     file_row = await _load_file(body.file_id, user)
-
-    t0 = time.perf_counter()
     ingestion = await _build_ingestion_bundle(body.file_id, user)
-    ingestion_ms = int((time.perf_counter() - t0) * 1000)
-
     input_hash = _sha256_json(ingestion)
     submission_kind = _detect_submission_kind(ingestion)
     analysis_type = "professor_project_review" if submission_kind == "project" else "professor_academic_review"
-    top_k = 6 if submission_kind == "project" else 5
     prompt_hash = _sha256_json(
         {
             "role": "professor",
-            "template": "professor_review_v5",
+            "pipeline": "phase12_langgraph",
+            "graph_name": "phase12_professor_graph",
+            "graph_version": phase10_settings.chain_version,
+            "chain_name": "phase10_professor_generation",
             "analysis_type": analysis_type,
-            "query_strategy": f"{submission_kind}_specific_v2",
+            "prompt_version": phase10_settings.professor_prompt_version,
+            "schema_version": phase10_settings.schema_version,
             "rag_enabled": settings.rag_enabled,
-            "top_k": top_k,
+            "primary_model": settings.llm_primary_label,
+            "fallback_model": settings.llm_fallback_label,
         }
-    )
-
-    injected = _detect_injection(
-        (ingestion.get("text_content") or "") + " " + (ingestion.get("audio_transcript") or "")
     )
 
     if not body.force:
@@ -1589,131 +1701,30 @@ async def generate_professor(body: GenerateIn, user: CurrentUser = Depends(get_c
                 "stored": _normalize_report_row("professor", existing[0]),
             }
 
-    t1 = time.perf_counter()
-    ml = await _call_ai_professor_multimodal(user, ingestion)
-    ai_ms = int((time.perf_counter() - t1) * 1000)
-
-    rag_meta: dict[str, Any] = {}
-    mode = "restricted" if injected else "normal"
-    professor_query = (
-        _professor_project_query(ingestion)
-        if submission_kind == "project"
-        else _professor_academic_query(ingestion)
+    final_state = await _graph_service.run_generation(
+        role="professor",
+        file_id=body.file_id,
+        user=user,
+        file_row=file_row,
+        ingestion_dict=ingestion,
+        input_hash=input_hash,
+        prompt_hash=prompt_hash,
     )
+    report = final_state.pipeline_context.report
+    rag_meta = final_state.pipeline_context.rag.model_dump(mode="json")
+    ml = dict(final_state.pipeline_context.ml_raw or {})
+    saved = final_state.storage_payload.get("stored_row")
 
-    llm_payload = {
-        "submission_id": str(file_row.get("submission_id") or ""),
-        "ingestion": ingestion,
-        "ml": {
-            "rubric_band": ml["rubric_band"],
-            "argument_depth": ml["argument_depth"],
-            "moderation_consistency": ml["moderation_consistency"],
-        },
-        "query": professor_query,
-        "top_k": top_k,
-        "mode": mode,
-        "analysis_type": analysis_type,
-        "analysis_focus": (
-            [
-                "project scope",
-                "architecture",
-                "technical implementation",
-                "security",
-                "testing",
-                "limitations",
-                "moderation risk",
-            ]
-            if submission_kind == "project"
-            else [
-                "structure",
-                "argument quality",
-                "evidence use",
-                "critical analysis",
-                "clarity",
-                "referencing",
-                "moderation risk",
-            ]
-        ),
-        "submission_type": submission_kind,
-        "official_only": True if (submission_kind == "academic" or settings.rag_require_official_for_professor) else None,
-        "safety_flags": {
-            "injection_detected": injected,
-        },
-    }
-
-    if settings.rag_enabled:
-        professor_rag_payload = build_professor_rag_payload(llm_payload)
-        logger.info(
-            "professor_generate rag summary file_id=%s mode=%s query=%r top_k=%s summary=%s",
-            body.file_id,
-            mode,
-            professor_query,
-            llm_payload.get("top_k"),
-            _rag_log_summary(professor_rag_payload),
-        )
-        llm_payload = inject_rag_fields(llm_payload, professor_rag_payload)
-    else:
-        logger.info(
-            "professor_generate rag disabled file_id=%s mode=%s query=%r top_k=%s",
-            body.file_id,
-            mode,
-            professor_query,
-            llm_payload.get("top_k"),
-        )
-
-    t2 = time.perf_counter()
-    llm_response, llm_model_used, llm_meta = await _call_llm("/llm/professor/report", llm_payload)
-    llm_ms = int((time.perf_counter() - t2) * 1000)
-
-    rag_meta = _extract_rag_meta(llm_response)
-    report, llm_ok = _validate_professor_report_for_storage(
-        _report_without_rag_meta(llm_response),
-        restricted=(mode == "restricted"),
-        ml=ml,
-        reason="The LLM output did not match the expected professor report schema.",
-    )
-
-    total_ms = int((time.perf_counter() - t_all) * 1000)
-    agreement = _agreement_score_professor(str(ml["moderation_consistency"]), injected, llm_ok)
-
-    saved = await _post_row(
-        "ai_reports",
-        {
-            "file_id": body.file_id,
-            "submission_id": file_row.get("submission_id"),
-            "role": "professor",
-            "report_json": report,
-            "report_hash": _sha256_json(report),
-            "prompt_hash": prompt_hash,
-            "input_hash": input_hash,
-            "model_versions": {
-                "request_id": request_id,
-                "timings_ms": {
-                    "ingestion": ingestion_ms,
-                    "ai_service": ai_ms,
-                    "llm_service": llm_ms,
-                    "total": total_ms,
-                },
-                "llm_primary": llm_meta.get("primary_model") or settings.llm_primary_label,
-                "llm_fallback": llm_meta.get("fallback_model") or settings.llm_fallback_label,
-                "llm_model_used": llm_model_used or "unknown",
-                "ml_models": {"rubric_suite": "professor.rubric_suite_multimodal.v1"},
-                "agreement": {
-                    "final_confidence": agreement,
-                    "injected": injected,
-                    "consistency": ml["moderation_consistency"],
-                },
-            },
-            **build_storage_fields_from_rag_meta(rag_meta),
-            "needs_review": bool((report.get("safety") or {}).get("needs_review", False))
-            or injected
-            or bool(rag_meta.get("safe_review", False)),
-        },
+    logger.info(
+        "professor ai_reports graph complete file_id=%s request_id=%s final_status=%s",
+        body.file_id,
+        final_state.pipeline_context.request_id,
+        final_state.final_status.value if final_state.final_status else final_state.status.value,
     )
 
     return {
         "cached": False,
-        "request_id": request_id,
+        "request_id": final_state.pipeline_context.request_id,
         "ml": ml,
         "report": report,
         "rag_meta": rag_meta,

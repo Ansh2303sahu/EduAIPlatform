@@ -11,6 +11,7 @@ import {
   ShieldAlert,
   ShieldCheck,
 } from "lucide-react";
+import AICheckPanel from "@/components/ai/AICheckPanel";
 import { backendUrl } from "@/lib/backendUrl";
 import { fetchJsonWithAuth } from "@/lib/fetchWithAuth";
 
@@ -31,6 +32,7 @@ function formatDate(value?: string | null) {
 
 export default function StudentHistoryPage() {
   const [items, setItems] = useState<HistoryItem[]>([]);
+  const [selectedFileId, setSelectedFileId] = useState<string | null>(null);
   const [q, setQ] = useState("");
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -84,6 +86,16 @@ export default function StudentHistoryPage() {
       alive = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (!items.length) {
+      setSelectedFileId(null);
+      return;
+    }
+    if (!selectedFileId || !items.some((item) => item.file_id === selectedFileId)) {
+      setSelectedFileId(items[0].file_id);
+    }
+  }, [items, selectedFileId]);
 
   const filtered = useMemo(() => {
     const s = q.trim().toLowerCase();
@@ -159,6 +171,14 @@ export default function StudentHistoryPage() {
             ) : null}
           </div>
 
+          {selectedFileId ? (
+            <AICheckPanel fileId={selectedFileId} role="student" />
+          ) : (
+            <section className="rounded-[30px] border border-dashed border-white/10 bg-white/[0.04] p-6 text-sm text-slate-400 shadow-[0_20px_70px_rgba(0,0,0,0.18)] backdrop-blur-xl">
+              Select or generate a student report to inspect LangChain, LangGraph, GenAI, MCP, and n8n results here.
+            </section>
+          )}
+
           <div className="rounded-[30px] border border-white/10 bg-white/[0.05] shadow-[0_20px_70px_rgba(0,0,0,0.24)] backdrop-blur-xl overflow-hidden">
             <div className="grid grid-cols-[220px_minmax(0,1fr)_160px_200px] gap-4 border-b border-white/10 bg-white/[0.04] px-5 py-4 text-xs font-extrabold uppercase tracking-[0.18em] text-slate-400 max-lg:hidden">
               <div>Date</div>
@@ -209,6 +229,19 @@ export default function StudentHistoryPage() {
                     </div>
 
                     <div className="flex flex-wrap gap-3">
+                      <button
+                        type="button"
+                        onClick={() => setSelectedFileId(x.file_id)}
+                        className={`inline-flex items-center gap-2 rounded-2xl border px-4 py-2.5 text-sm font-bold transition ${
+                          selectedFileId === x.file_id
+                            ? "border-emerald-300/20 bg-emerald-400/10 text-emerald-100"
+                            : "border-white/10 bg-white/8 text-slate-100 hover:bg-white/12"
+                        }`}
+                      >
+                        <ShieldCheck size={15} />
+                        {selectedFileId === x.file_id ? "Showing AI check" : "AI Check"}
+                      </button>
+
                       <Link
                         href={`/student/results/${x.file_id}`}
                         className="inline-flex items-center gap-2 rounded-2xl border border-blue-300/20 bg-blue-500/10 px-4 py-2.5 text-sm font-bold text-blue-100 transition hover:bg-blue-500/15"

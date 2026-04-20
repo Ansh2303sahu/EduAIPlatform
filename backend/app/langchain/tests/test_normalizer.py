@@ -80,6 +80,47 @@ class TestNormalizeStudentOutput:
         result = normalize_student_output({"summary": "s"}, safe_mode=True)
         assert result["confidence"]["overall"] == pytest.approx(0.35, abs=0.01)
 
+    def test_rich_student_fields_are_preserved(self):
+        raw = {
+            "summary": "The report is mostly coherent but needs stronger evidence in the discussion.",
+            "overall_judgment": "A credible draft with one major evidence gap.",
+            "strengths": [
+                {"title": "Clear framing", "detail": "The introduction sets up the task clearly."}
+            ],
+            "weaknesses": [
+                {
+                    "title": "Analysis is thin",
+                    "detail": "The discussion section names examples but does not evaluate them.",
+                    "severity": "medium",
+                }
+            ],
+            "section_feedback": [
+                {
+                    "section_name": "Discussion",
+                    "what_works": "Examples are relevant.",
+                    "what_needs_improvement": "The analysis stays descriptive.",
+                    "recommended_fix": "Add a short comparison of the strongest and weakest examples.",
+                }
+            ],
+            "priority_issue": {
+                "title": "Deepen the discussion section",
+                "why_it_matters": "It currently limits the overall mark.",
+                "how_to_fix_it": "Compare the evidence rather than listing it.",
+            },
+            "confidence_explanation": "Confidence is moderate because the evidence is clear in the introduction but thinner in the discussion.",
+            "evidence_coverage": "The middle section has the weakest grounding.",
+        }
+
+        result = normalize_student_output(raw, safe_mode=False)
+
+        assert result["overall_judgment"] == "A credible draft with one major evidence gap."
+        assert result["strengths"][0]["detail"] == "The introduction sets up the task clearly."
+        assert result["weaknesses"][0]["severity"] == "med"
+        assert result["section_feedback"][0]["section_name"] == "Discussion"
+        assert result["priority_issue"]["title"] == "Deepen the discussion section"
+        assert "moderate" in result["confidence_explanation"].lower()
+        assert "weakest grounding" in result["evidence_coverage"].lower()
+
 
 # ---------------------------------------------------------------------------
 # Professor normalizer
@@ -125,3 +166,46 @@ class TestNormalizeProfessorOutput:
         result = normalize_professor_output({})
         assert result["safety"]["needs_review"] is False
         assert isinstance(result["safety"]["reason"], str)
+
+    def test_professor_rich_fields_and_legacy_breakdown_can_coexist(self):
+        result = normalize_professor_output(
+            {
+                "summary": "Evidence supports a mid-band judgement with one moderation caution.",
+                "evaluator_overview": "Argument quality is adequate, but evidence coverage is uneven.",
+                "rubric_breakdown": [
+                    {
+                        "criterion": "Argument",
+                        "band": "Merit",
+                        "justification": "The core position is clear and mostly supported.",
+                    }
+                ],
+                "rubric_alignment": ["Argument quality", "Use of evidence"],
+                "strengths": [{"title": "Clear thesis", "detail": "The position is explicit from the opening."}],
+                "concerns": [
+                    {
+                        "title": "Evidence depth",
+                        "detail": "Later sections assert points without enough comparison.",
+                    }
+                ],
+                "section_observations": [
+                    {
+                        "section_name": "Conclusion",
+                        "observation": "Returns to the thesis.",
+                        "concern": "It does not weigh counterarguments.",
+                        "next_step": "Check whether the body already addresses them.",
+                    }
+                ],
+                "marking_considerations": ["Re-check evidence weighting in the final two sections."],
+                "action_recommendations": ["Review whether the evidence depth matches the proposed band."],
+                "confidence_explanation": "Confidence is moderate because the opening is strong but the later analysis is uneven.",
+            }
+        )
+
+        assert result["summary"].startswith("Evidence supports")
+        assert result["evaluator_overview"].startswith("Argument quality")
+        assert result["rubric_alignment"] == ["Argument quality", "Use of evidence"]
+        assert result["strengths"][0]["detail"] == "The position is explicit from the opening."
+        assert result["concerns"][0]["detail"] == "Later sections assert points without enough comparison."
+        assert result["section_observations"][0]["section_name"] == "Conclusion"
+        assert result["marking_considerations"][0].startswith("Re-check evidence weighting")
+        assert result["action_recommendations"][0].startswith("Review whether")

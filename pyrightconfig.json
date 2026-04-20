@@ -1,0 +1,24 @@
+{
+  "include": [
+    "backend",
+    "llm-service",
+    "ai-service",
+    "parser"
+  ],
+  "venvPath": "backend",
+  "venv": ".venv",
+  "executionEnvironments": [
+    {
+      "root": "backend"
+    },
+    {
+      "root": "llm-service"
+    },
+    {
+      "root": "ai-service"
+    },
+    {
+      "root": "parser"
+    }
+  ]
+}

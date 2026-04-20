@@ -62,7 +62,7 @@ class ExplainabilityMeta(BaseModel):
     Included in every MCPSuccessEnvelope so callers can surface it to users.
     """
 
-    model_config = {"extra": "forbid"}
+    model_config = {"extra": "forbid", "protected_namespaces": ()}
 
     # Whether the result came from the in-process cache (no LLM call).
     cache_hit: bool = False

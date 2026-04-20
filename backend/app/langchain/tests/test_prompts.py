@@ -90,13 +90,21 @@ def test_student_prompt_contains_required_sections() -> None:
     prompt = build_student_prompt(_student_ctx())
 
     assert "SHARED RULES" in prompt
-    assert "EXTRACTED SUBMISSION SUMMARY" in prompt
+    assert "ASSIGNMENT CONTEXT" in prompt
+    assert "SUBMISSION DIGEST" in prompt
+    assert "REPRESENTATIVE EXCERPTS" in prompt
     assert "PHASE 6 ML PREDICTIONS" in prompt
     assert "STUDENT RAG CONTEXT" in prompt
     assert "Never invent citations" in prompt
-    assert '"summary":"string"' in prompt
+    assert '"summary"' in prompt
+    assert '"overall_judgment"' in prompt
+    assert '"section_feedback"' in prompt
+    assert '"priority_issue"' in prompt
     assert '"strengths"' in prompt
-    assert "senior technical reviewer" in prompt
+    assert "Every criticism must explain what is weak" in prompt
+    assert "quote or closely paraphrase a specific sentence" in prompt
+    assert "Submission evidence is primary" in prompt
+    assert "Focus on the actual submission" in prompt
     assert "Retrieval trace summary:" in prompt
 
 
@@ -111,10 +119,16 @@ def test_professor_prompt_contains_discrepancy_guidance() -> None:
     prompt = build_professor_prompt(_professor_ctx())
 
     assert "DISCREPANCY AND REVIEW BEHAVIOR" in prompt
+    assert "ASSIGNMENT CONTEXT" in prompt
+    assert "REPRESENTATIVE EXCERPTS" in prompt
     assert "PROFESSOR RAG CONTEXT" in prompt
     assert "rubric_breakdown" in prompt
+    assert "evaluator_overview" in prompt
+    assert "rubric_alignment" in prompt
+    assert "section_observations" in prompt
     assert "Never invent citations" in prompt
     assert "rubric, policy, moderation consistency" in prompt
+    assert "Every criticism must explain what is weak" in prompt
 
 
 def test_professor_safe_prompt_contains_review_rules() -> None:

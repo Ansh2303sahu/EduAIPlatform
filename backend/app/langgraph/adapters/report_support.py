@@ -26,15 +26,26 @@ async def load_file_for_state(state: Phase12GraphState) -> dict[str, Any]:
     """Load the file row using the existing report support helper."""
 
     current_user = build_current_user_from_state(state)
-    return await support.get_file_or_404(state.request.file_id, current_user)
+    return await support.load_file(state.request.file_id, current_user)
 
 
 async def build_ingestion_bundle_for_state(state: Phase12GraphState) -> IngestionBundle:
     """Build the standard ingestion bundle through report_generation_support."""
 
-    file_row = state.file_row or await load_file_for_state(state)
-    state.file_row = file_row
-    return support.build_ingestion_bundle(file_row, state.request.file_id)
+    existing = state.pipeline_context.ingestion
+    if (
+        existing.text_content
+        or existing.ocr_text
+        or existing.audio_transcript
+        or existing.tables_json is not None
+    ):
+        return existing
+
+    current_user = build_current_user_from_state(state)
+    payload = await support.build_ingestion_bundle(state.request.file_id, current_user)
+    bundle = IngestionBundle.model_validate(payload)
+    state.pipeline_context.ingestion = bundle
+    return bundle
 
 
 def ingestion_bundle_from_dict(data: dict[str, Any]) -> IngestionBundle:
@@ -46,7 +57,13 @@ def ingestion_bundle_from_dict(data: dict[str, Any]) -> IngestionBundle:
 def detect_submission_kind(bundle: IngestionBundle) -> str:
     """Reuse the existing submission-kind detection heuristic."""
 
-    return support.detect_submission_kind(bundle.combined_text())
+    return support.detect_submission_kind(bundle.model_dump(mode="json"))
+
+
+def classify_submission_form(bundle: IngestionBundle) -> str:
+    """Return the fine-grained submission form used for prompt and RAG routing."""
+
+    return support.classify_submission_form(bundle.model_dump(mode="json"))
 
 
 def analysis_type_for_role(*, role: str, submission_kind: str) -> AnalysisType:
@@ -69,17 +86,21 @@ def analysis_type_for_role(*, role: str, submission_kind: str) -> AnalysisType:
 async def call_student_ml_for_state(state: Phase12GraphState) -> dict[str, Any]:
     """Call the existing student ML inference flow."""
 
-    file_row = state.file_row or await load_file_for_state(state)
+    if state.pipeline_context.ml_raw:
+        return dict(state.pipeline_context.ml_raw)
     current_user = build_current_user_from_state(state)
-    return await support.call_student_ml(file_row, current_user)
+    ingestion = state.pipeline_context.ingestion.model_dump(mode="json")
+    return await support.call_ai_student_multimodal(current_user, ingestion)
 
 
 async def call_professor_ml_for_state(state: Phase12GraphState) -> dict[str, Any]:
     """Call the existing professor ML inference flow."""
 
-    file_row = state.file_row or await load_file_for_state(state)
+    if state.pipeline_context.ml_raw:
+        return dict(state.pipeline_context.ml_raw)
     current_user = build_current_user_from_state(state)
-    return await support.call_professor_ml(file_row, current_user)
+    ingestion = state.pipeline_context.ingestion.model_dump(mode="json")
+    return await support.call_ai_professor_multimodal(current_user, ingestion)
 
 
 def sha256_json(value: Any) -> str:

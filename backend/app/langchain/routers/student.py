@@ -37,6 +37,7 @@ from app.services.report_generation_support import (
     post_row as _post_row,
     rate_limit as _rate_limit,
     sha256_json as _sha256_json,
+    uuid_or_none as _uuid_or_none,
 )
 
 router = APIRouter(prefix="/langchain", tags=["langchain"])
@@ -119,6 +120,8 @@ async def _generate_student(
         submission_kind=submission_kind,
         user_id=str(user.id),
         file_metadata={
+            "file_id": body.file_id,
+            "submission_id": file_row.get("submission_id"),
             "mime_type": file_row.get("mime_type"),
             "created_at": file_row.get("created_at"),
         },
@@ -128,8 +131,8 @@ async def _generate_student(
     stored = await _post_row(
         "ai_reports",
         {
-            "file_id": body.file_id,
-            "submission_id": file_row.get("submission_id"),
+            "file_id": _uuid_or_none(body.file_id),
+            "submission_id": _uuid_or_none(file_row.get("submission_id")),
             "role": "student",
             "report_json": result["report"],
             "report_hash": _sha256_json(result["report"]),

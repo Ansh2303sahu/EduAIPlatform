@@ -5,6 +5,7 @@ import json
 import sys
 from pathlib import Path
 
+import httpx
 import pytest
 
 SERVICE_ROOT = Path(__file__).resolve().parents[1]
@@ -461,12 +462,223 @@ def test_placeholder_anthropic_key_forces_ollama(monkeypatch: pytest.MonkeyPatch
     assert service_main._generate_with_specific_model is not None
 
 
-def test_config_defaults_mistral_primary_gemma_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
-    """When no env vars are set, mistral must be primary and gemma3 must be fallback."""
+def test_config_defaults_gemma_primary_phi3_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When no env vars are set, gemma3:4b must be primary and phi3:mini must be fallback."""
+    service_main = _load_service_main(
+        monkeypatch,
+        LLM_PROVIDER="ollama",
+        OLLAMA_NUM_CTX="8192",
+        OLLAMA_MAX_NUM_CTX="8192",
+        OLLAMA_NUM_PREDICT="1200",
+        OLLAMA_MAX_NUM_PREDICT="1400",
+        OLLAMA_TEMPERATURE="0.15",
+        OLLAMA_REPEAT_PENALTY="1.12",
+        LLM_PROFESSOR_REPORT_MAX_OUTPUT_TOKENS="1200",
+        LLM_REPAIR_MAX_OUTPUT_TOKENS="700",
+    )
+
+    assert service_main.settings.primary_model == "gemma3:4b"
+    assert service_main.settings.fallback_model == "phi3:mini"
+    assert service_main.settings.ollama_num_ctx == 8192
+    assert service_main.settings.ollama_max_num_ctx == 8192
+    assert service_main.settings.ollama_num_predict == 1200
+    assert service_main.settings.ollama_max_num_predict == 1400
+    assert service_main.settings.ollama_num_batch == 16
+    assert service_main.settings.ollama_temperature == pytest.approx(0.15)
+    assert service_main.settings.ollama_repeat_penalty == pytest.approx(1.12)
+    assert service_main.settings.ollama_fallback_num_ctx == 3072
+    assert service_main.settings.ollama_fallback_num_predict == 512
+    assert service_main.settings.ollama_fallback_num_batch == 16
+    assert service_main.settings.max_input_chars == 12000
+    assert service_main.settings.student_report_max_output_tokens == 1200
+    assert service_main.settings.professor_report_max_output_tokens == 1200
+    assert service_main.settings.repair_max_output_tokens == 700
+
+
+@pytest.mark.asyncio
+async def test_health_reports_provider_status(monkeypatch: pytest.MonkeyPatch) -> None:
     service_main = _load_service_main(monkeypatch, LLM_PROVIDER="ollama")
 
-    assert service_main.settings.primary_model == "mistral:latest"
-    assert service_main.settings.fallback_model == "gemma3:latest"
+    async def fake_status() -> dict[str, object]:
+        return {
+            "provider": "ollama",
+            "ready": False,
+            "installed_models": [],
+            "missing_models": ["mistral:latest"],
+        }
+
+    monkeypatch.setattr(service_main, "_get_provider_status", fake_status)
+
+    body = await service_main.health()
+
+    assert body["ok"] is True
+    assert body["effective_provider"] == "ollama"
+    assert body["provider_status"]["ready"] is False
+    assert body["provider_status"]["missing_models"] == ["mistral:latest"]
+
+
+@pytest.mark.asyncio
+async def test_ready_returns_503_when_provider_not_ready(monkeypatch: pytest.MonkeyPatch) -> None:
+    service_main = _load_service_main(monkeypatch, LLM_PROVIDER="ollama")
+
+    async def fake_status() -> dict[str, object]:
+        return {
+            "provider": "ollama",
+            "ready": False,
+            "installed_models": [],
+            "missing_models": ["gemma3:4b", "phi3:mini"],
+        }
+
+    monkeypatch.setattr(service_main, "_get_provider_status", fake_status)
+
+    response = await service_main.ready()
+    body = json.loads(response.body)
+
+    assert response.status_code == 503
+    assert body["ready"] is False
+    assert body["provider_status"]["missing_models"] == ["gemma3:4b", "phi3:mini"]
+
+
+@pytest.mark.asyncio
+async def test_ollama_generate_json_explains_missing_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    _load_service_main(
+        monkeypatch,
+        LLM_PROVIDER="ollama",
+        OLLAMA_PRIMARY_MODEL="mistral:latest",
+        OLLAMA_FALLBACK_MODEL="gemma3:latest",
+    )
+    ollama_client = importlib.import_module("app.ollama_client")
+
+    class FakeResponse:
+        def __init__(self, status_code: int, payload: dict[str, object], url: str) -> None:
+            self.status_code = status_code
+            self._payload = payload
+            self._text = json.dumps(payload)
+            self.request = httpx.Request("POST" if url.endswith("/api/generate") else "GET", url)
+
+        def raise_for_status(self) -> None:
+            if self.status_code >= 400:
+                raise httpx.HTTPStatusError(
+                    "request failed",
+                    request=self.request,
+                    response=self,
+                )
+
+        def json(self) -> dict[str, object]:
+            return self._payload
+
+        @property
+        def text(self) -> str:
+            return self._text
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def post(self, url: str, json: dict[str, object]) -> FakeResponse:
+            return FakeResponse(
+                404,
+                {"error": f"model '{json['model']}' not found"},
+                url,
+            )
+
+        async def get(self, url: str) -> FakeResponse:
+            return FakeResponse(200, {"models": []}, url)
+
+    monkeypatch.setattr(ollama_client.httpx, "AsyncClient", FakeAsyncClient)
+
+    with pytest.raises(RuntimeError) as exc:
+        await ollama_client.ollama_generate_json({"model": "mistral:latest", "prompt": "hello"})
+
+    message = str(exc.value)
+    assert "Ollama model 'mistral:latest' is not installed" in message
+    assert "Run `ollama pull mistral:latest`" in message
+
+
+@pytest.mark.asyncio
+async def test_ollama_generate_json_explains_connect_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    _load_service_main(
+        monkeypatch,
+        LLM_PROVIDER="ollama",
+        OLLAMA_PRIMARY_MODEL="mistral:latest",
+        OLLAMA_FALLBACK_MODEL="gemma3:latest",
+    )
+    ollama_client = importlib.import_module("app.ollama_client")
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def post(self, url: str, json: dict[str, object]):
+            raise httpx.ConnectError(
+                "All connection attempts failed",
+                request=httpx.Request("POST", url),
+            )
+
+    monkeypatch.setattr(ollama_client.httpx, "AsyncClient", FakeAsyncClient)
+
+    with pytest.raises(RuntimeError) as exc:
+        await ollama_client.ollama_generate_json({"model": "mistral:latest", "prompt": "hello"})
+
+    message = str(exc.value)
+    assert "Could not reach Ollama" in message
+    assert "OLLAMA_BASE_URL" in message
+    assert "Requested model: mistral:latest." in message
+
+
+@pytest.mark.asyncio
+async def test_generate_with_fallback_retries_primary_before_phi(monkeypatch: pytest.MonkeyPatch) -> None:
+    _load_service_main(
+        monkeypatch,
+        LLM_PROVIDER="ollama",
+        OLLAMA_PRIMARY_MODEL="gemma3:4b",
+        OLLAMA_FALLBACK_MODEL="phi3:mini",
+        OLLAMA_OPTIONS_JSON="",
+        OLLAMA_NUM_CTX="8192",
+        OLLAMA_MAX_NUM_CTX="8192",
+        OLLAMA_NUM_PREDICT="1200",
+        OLLAMA_MAX_NUM_PREDICT="1400",
+        OLLAMA_TEMPERATURE="0.15",
+        OLLAMA_REPEAT_PENALTY="1.12",
+    )
+    ollama_client = importlib.import_module("app.ollama_client")
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    async def fake_ollama_generate_json(payload: dict[str, object]) -> dict[str, object]:
+        calls.append((str(payload["model"]), dict(payload.get("options") or {})))
+        if len(calls) < 3:
+            raise RuntimeError(f"attempt {len(calls)} failed")
+        return {"response": '{"ok": true}', "done": True, "done_reason": "stop"}
+
+    monkeypatch.setattr(ollama_client, "ollama_generate_json", fake_ollama_generate_json)
+
+    result = await ollama_client.generate_with_fallback({"prompt": "Return JSON"})
+
+    assert result["model_used"] == "phi3:mini"
+    assert calls[0][0] == "gemma3:4b"
+    assert calls[0][1]["num_ctx"] == 8192
+    assert calls[0][1]["num_predict"] == 1200
+    assert calls[0][1]["num_batch"] == 16
+    assert calls[1][0] == "gemma3:4b"
+    assert calls[1][1]["num_ctx"] == 6144
+    assert calls[1][1]["num_predict"] == 1000
+    assert calls[1][1]["num_batch"] == 8
+    assert calls[2][0] == "phi3:mini"
+    assert calls[2][1]["num_ctx"] == 3072
+    assert calls[2][1]["num_predict"] == 512
+    assert calls[2][1]["num_batch"] == 8
 
 
 @pytest.mark.asyncio
@@ -534,6 +746,117 @@ def test_parse_llm_json_repairs_common_local_model_mistakes(monkeypatch: pytest.
     assert parsed["issues"] == []
 
 
+def test_parse_llm_json_repairs_missing_comma_between_top_level_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service_main = _load_service_main(monkeypatch, LLM_PROVIDER="ollama")
+    raw = """
+{
+  "summary": "Good work",
+  "issues": [],
+  "strengths": []
+  "safety": {"needs_review": false, "reason": ""}
+}
+"""
+
+    parsed = service_main._parse_llm_json(raw)
+    assert parsed["summary"] == "Good work"
+    assert parsed["strengths"] == []
+    assert parsed["safety"]["needs_review"] is False
+
+
+def test_parse_llm_json_repairs_missing_comma_before_bare_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service_main = _load_service_main(monkeypatch, LLM_PROVIDER="ollama")
+    raw = """
+{
+  "summary": "Good work"
+  issues: []
+  safety: {needs_review: false, reason: ""}
+}
+"""
+
+    parsed = service_main._parse_llm_json(raw)
+    assert parsed["summary"] == "Good work"
+    assert parsed["issues"] == []
+    assert parsed["safety"]["needs_review"] is False
+
+
+def test_parse_llm_json_repairs_more_than_four_missing_commas(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service_main = _load_service_main(monkeypatch, LLM_PROVIDER="ollama")
+    raw = """
+{
+  "summary": "Good work"
+  "issues": []
+  "strengths": []
+  "checklist": [
+    {"item": "Add tests", "done": false}
+    {"item": "Document flow", "done": false}
+  ]
+  "confidence": {"mode": "normal", "overall": 0.72}
+  "safety": {"needs_review": false, "reason": ""}
+}
+"""
+
+    parsed = service_main._parse_llm_json(raw)
+    assert parsed["summary"] == "Good work"
+    assert len(parsed["checklist"]) == 2
+    assert parsed["confidence"]["overall"] == pytest.approx(0.72)
+    assert parsed["safety"]["needs_review"] is False
+
+
+def test_parse_llm_json_repairs_unescaped_quotes_inside_string_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service_main = _load_service_main(monkeypatch, LLM_PROVIDER="ollama")
+    raw = """
+{
+  "summary": "The submission is promising overall.",
+  "issues": [
+    {
+      "title": "Claim-to-evidence chain is too broad",
+      "evidence": "The claim in "Week 2 This exercise demonstrates recursive drawing of triangles using midpoint calculations." is broader than the explanation that follows.",
+      "severity": "med"
+    }
+  ],
+  "strengths": [],
+  "safety": {"needs_review": false, "reason": ""}
+}
+"""
+
+    parsed = service_main._parse_llm_json(raw)
+    assert parsed["issues"][0]["title"] == "Claim-to-evidence chain is too broad"
+    assert '"Week 2 This exercise demonstrates recursive drawing of triangles using midpoint calculations."' in parsed["issues"][0]["evidence"]
+    assert parsed["safety"]["needs_review"] is False
+
+
+def test_student_input_normalizes_local_model_signal_noise(monkeypatch: pytest.MonkeyPatch) -> None:
+    service_main = _load_service_main(monkeypatch, LLM_PROVIDER="ollama")
+
+    payload = service_main.StudentReportIn.model_validate(
+        {
+            "submission_id": "sub-clamped-1",
+            "ingestion": {
+                "text_content": "A short submission.",
+                "ocr_text": "",
+                "audio_transcript": "",
+                "tables_json": None,
+            },
+            "ml": {
+                "feedback_category": "clarity",
+                "quality_band": "Medium",
+                "confidence_0_to_4": 5,
+            },
+        }
+    )
+
+    assert payload.ml.quality_band == "med"
+    assert payload.ml.confidence_0_to_4 == 4
+
+
 @pytest.mark.asyncio
 async def test_student_report_uses_gemma_repair_after_mistral_json_failure(
     monkeypatch: pytest.MonkeyPatch,
@@ -556,7 +879,9 @@ async def test_student_report_uses_gemma_repair_after_mistral_json_failure(
             "raw": {},
         }
 
-    async def fake_repair(_prompt: str) -> dict[str, object]:
+    async def fake_repair(
+        _prompt: str, *, fallback_raw: str = ""
+    ) -> dict[str, object]:
         return {
             "model_used": "gemma3:latest",
             "response": _student_json("Recovered by the fallback model."),
@@ -651,7 +976,9 @@ async def test_professor_report_returns_schema_safe_fallback_when_both_models_fa
             "raw": {},
         }
 
-    async def fake_repair(_prompt: str) -> dict[str, object]:
+    async def fake_repair(
+        _prompt: str, *, fallback_raw: str = ""
+    ) -> dict[str, object]:
         return {
             "model_used": "gemma3:latest",
             "response": "Still not JSON either",
@@ -674,6 +1001,66 @@ async def test_professor_report_returns_schema_safe_fallback_when_both_models_fa
     assert response.headers["x-llm-fallback"] == "true"
     assert body["safety"]["needs_review"] is True
     assert body["rubric_breakdown"][0]["band"] == "Needs review"
+
+
+@pytest.mark.asyncio
+async def test_professor_report_returns_schema_safe_fallback_on_transport_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service_main = _load_service_main(
+        monkeypatch,
+        LLM_PROVIDER="ollama",
+        OLLAMA_PRIMARY_MODEL="mistral:latest",
+        OLLAMA_FALLBACK_MODEL="mistral:latest",
+        LLM_SERVICE_SECRET="dev_llm_secret",
+    )
+
+    async def fake_generate(_prompt: str) -> dict[str, object]:
+        raise RuntimeError("wsarecv: connection forcibly closed")
+
+    monkeypatch.setattr(service_main, "generate_with_fallback", fake_generate)
+
+    response = await service_main.professor_report(
+        _professor_payload(service_main),
+        x_ai_secret="dev_llm_secret",
+    )
+
+    body = json.loads(response.body)
+    assert response.status_code == 200
+    assert response.headers["x-llm-model-used"] == "mistral:latest"
+    assert response.headers["x-llm-fallback"] == "true"
+    assert body["safety"]["needs_review"] is True
+    assert body["rubric_breakdown"][0]["band"] == "Needs review"
+
+
+@pytest.mark.asyncio
+async def test_student_report_returns_schema_safe_fallback_on_transport_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service_main = _load_service_main(
+        monkeypatch,
+        LLM_PROVIDER="ollama",
+        OLLAMA_PRIMARY_MODEL="mistral:latest",
+        OLLAMA_FALLBACK_MODEL="mistral:latest",
+        LLM_SERVICE_SECRET="dev_llm_secret",
+    )
+
+    async def fake_generate(_prompt: str) -> dict[str, object]:
+        raise RuntimeError("wsarecv: connection forcibly closed")
+
+    monkeypatch.setattr(service_main, "generate_with_fallback", fake_generate)
+
+    response = await service_main.student_report(
+        _student_payload(service_main),
+        x_ai_secret="dev_llm_secret",
+    )
+
+    body = json.loads(response.body)
+    assert response.status_code == 200
+    assert response.headers["x-llm-model-used"] == "mistral:latest"
+    assert response.headers["x-llm-fallback"] == "true"
+    assert body["safety"]["needs_review"] is True
+    assert "Manual review is required" in body["summary"]
 
 
 @pytest.mark.asyncio
@@ -769,18 +1156,18 @@ async def test_representative_project_payload_produces_substantive_report(
     service_main = _load_service_main(
         monkeypatch,
         LLM_PROVIDER="ollama",
-        OLLAMA_PRIMARY_MODEL="gemma3:latest",
-        OLLAMA_FALLBACK_MODEL="mistral:latest",
+        OLLAMA_PRIMARY_MODEL="gemma3:4b",
+        OLLAMA_FALLBACK_MODEL="phi3:mini",
         LLM_SERVICE_SECRET="dev_llm_secret",
     )
 
     payload = _representative_project_payload(service_main)
-    captured: dict[str, str] = {}
+    captured: dict[str, object] = {}
 
-    async def fake_generate(prompt: str) -> dict[str, object]:
-        captured["prompt"] = prompt
+    async def fake_generate(prompt_payload: dict[str, object]) -> dict[str, object]:
+        captured["payload"] = prompt_payload
         return {
-            "model_used": "gemma3:latest",
+            "model_used": "gemma3:4b",
             "response": _student_placeholder_json(),
             "done": True,
             "done_reason": "stop",
@@ -789,7 +1176,7 @@ async def test_representative_project_payload_produces_substantive_report(
 
     async def fake_content_retry(_prompt: str) -> dict[str, object]:
         return {
-            "model_used": "mistral:latest",
+            "model_used": "phi3:mini",
             "response": _student_placeholder_json(),
             "done": True,
             "done_reason": "stop",
@@ -805,9 +1192,17 @@ async def test_representative_project_payload_produces_substantive_report(
     )
 
     body = json.loads(response.body)
-    prompt_text = captured["prompt"]
+    payload_json = captured["payload"]
+    assert isinstance(payload_json, dict)
+    prompt_text = str(payload_json["prompt"])
+    assert payload_json["options"]["num_predict"] == service_main._scaled_num_predict(
+        payload.ingestion.text_content or "",
+        default_tokens=service_main.settings.student_report_max_output_tokens,
+        maximum_tokens=service_main.settings.ollama_max_num_predict,
+    )
     assert "Submission evidence digest:" in prompt_text
-    assert "do not leave issues, improvement_plan, and checklist all empty" in prompt_text.lower()
+    assert "do not leave strengths, weaknesses, improvements, and checklist all empty" in prompt_text.lower()
+    assert "do not return the larger expanded schema" in prompt_text.lower()
     assert "StockIntel" in prompt_text
     assert len(prompt_text) < 16000
     assert service_main._is_student_placeholder_summary(body["summary"]) is False
@@ -827,13 +1222,13 @@ def test_student_prompt_specializes_for_essay_style(
     service_main = _load_service_main(monkeypatch, LLM_PROVIDER="ollama")
     payload = _essay_like_payload(service_main)
 
-    prompt_text = service_main.student_prompt(payload, safe_mode=False)
+    prompt_text, _, _ = service_main.student_prompt(payload, safe_mode=False)
 
     assert service_main.student_feedback_style(payload) == "essay"
     assert "strict university marker" in prompt_text.lower()
     assert "critical analysis" in prompt_text.lower()
     assert "referencing" in prompt_text.lower()
-    assert "2 strengths, 2-3 issues, 2-3 improvement actions, and 3 checklist items" in prompt_text.lower()
+    assert "2 strengths, 2-3 weaknesses, 2-3 improvement actions, and 3 checklist items" in prompt_text.lower()
 
 
 def test_student_prompt_treats_security_analysis_report_as_essay_style(
@@ -862,7 +1257,8 @@ def test_student_prompt_treats_security_analysis_report_as_essay_style(
         }
     )
 
-    prompt_text = service_main.student_prompt(payload, safe_mode=False).lower()
+    prompt_text, _, _ = service_main.student_prompt(payload, safe_mode=False)
+    prompt_text = prompt_text.lower()
 
     assert service_main.student_feedback_style(payload) == "essay"
     assert "strict university marker" in prompt_text
@@ -875,7 +1271,7 @@ def test_student_prompt_specializes_for_code_style_even_without_project_flag(
     service_main = _load_service_main(monkeypatch, LLM_PROVIDER="ollama")
     payload = _code_like_non_project_payload(service_main)
 
-    prompt_text = service_main.student_prompt(payload, safe_mode=False)
+    prompt_text, _, _ = service_main.student_prompt(payload, safe_mode=False)
 
     assert service_main.student_feedback_style(payload) == "code"
     assert "senior software reviewer" in prompt_text.lower()
@@ -892,18 +1288,18 @@ async def test_representative_essay_payload_produces_substantive_report(
     service_main = _load_service_main(
         monkeypatch,
         LLM_PROVIDER="ollama",
-        OLLAMA_PRIMARY_MODEL="gemma3:latest",
-        OLLAMA_FALLBACK_MODEL="mistral:latest",
+        OLLAMA_PRIMARY_MODEL="gemma3:4b",
+        OLLAMA_FALLBACK_MODEL="phi3:mini",
         LLM_SERVICE_SECRET="dev_llm_secret",
     )
 
     payload = _representative_essay_payload(service_main)
-    captured: dict[str, str] = {}
+    captured: dict[str, object] = {}
 
-    async def fake_generate(prompt: str) -> dict[str, object]:
-        captured["prompt"] = prompt
+    async def fake_generate(prompt_payload: dict[str, object]) -> dict[str, object]:
+        captured["payload"] = prompt_payload
         return {
-            "model_used": "gemma3:latest",
+            "model_used": "gemma3:4b",
             "response": _student_placeholder_json(),
             "done": True,
             "done_reason": "stop",
@@ -912,7 +1308,7 @@ async def test_representative_essay_payload_produces_substantive_report(
 
     async def fake_content_retry(_prompt: str) -> dict[str, object]:
         return {
-            "model_used": "mistral:latest",
+            "model_used": "phi3:mini",
             "response": _student_placeholder_json(),
             "done": True,
             "done_reason": "stop",
@@ -928,7 +1324,15 @@ async def test_representative_essay_payload_produces_substantive_report(
     )
 
     body = json.loads(response.body)
-    prompt_text = captured["prompt"].lower()
+    payload_json = captured["payload"]
+    assert isinstance(payload_json, dict)
+    prompt_text = str(payload_json["prompt"])
+    assert payload_json["options"]["num_predict"] == service_main._scaled_num_predict(
+        payload.ingestion.text_content or "",
+        default_tokens=service_main.settings.student_report_max_output_tokens,
+        maximum_tokens=service_main.settings.ollama_max_num_predict,
+    )
+    prompt_text = prompt_text.lower()
     assert "strict university marker" in prompt_text
     assert "critical analysis" in prompt_text
     assert "submission evidence digest:" in prompt_text
@@ -960,6 +1364,136 @@ def test_student_normalization_preserves_meaningful_alias_content(
     assert normalized["checklist"][0]["item"] == "Add integration tests"
     assert normalized["model_agreement"]["llm_confidence"] == pytest.approx(0.71)
     assert service_main._student_report_low_content_quality(normalized) is False
+
+
+def test_student_normalization_recovers_string_lists_and_flat_flags(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service_main = _load_service_main(monkeypatch, LLM_PROVIDER="ollama")
+
+    normalized = service_main._normalize_student_llm_json(
+        {
+            "main_excerpt": "The review should focus on testing depth.",
+            "weaknesses": "Testing evidence is thin across integration paths.",
+            "strengths": "The architecture is described clearly.",
+            "improvements": "Add integration and failure-path tests.",
+            "safe_review": "true",
+            "safety_reason": "Grounding evidence was limited.",
+            "confidence_0_to_4": 5,
+        },
+        safe_mode=False,
+    )
+
+    assert normalized["summary"] == "The review should focus on testing depth."
+    assert normalized["issues"][0]["title"] == "Testing evidence is thin across integration paths."
+    assert normalized["strengths"][0]["title"] == "The architecture is described clearly."
+    assert normalized["improvement_plan"][0]["action"] == "Add integration and failure-path tests."
+    assert normalized["safety"]["needs_review"] is True
+    assert normalized["safety"]["reason"] == "Grounding evidence was limited."
+    assert normalized["model_agreement"]["ml_confidence"] == pytest.approx(1.0)
+
+
+def test_student_normalization_recovers_compact_project_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service_main = _load_service_main(monkeypatch, LLM_PROVIDER="ollama")
+
+    normalized = service_main._normalize_student_llm_json(
+        {
+            "summary": "The project shows a clear full-stack implementation with meaningful testing evidence.",
+            "strengths": [
+                "The backend and frontend responsibilities are clearly separated in the submission.",
+                "The testing section names concrete functional and regression checks."
+            ],
+            "weaknesses": [
+                "The architecture rationale does not explain why the chosen AI orchestration boundary is maintainable long term."
+            ],
+            "architecture_review": {
+                "overview": "The architecture follows a layered service pattern.",
+                "backend": "FastAPI services coordinate the core report flow.",
+                "frontend": "React pages handle the student-facing workflow.",
+                "database": "Persistent storage is present but schema detail is brief.",
+                "security": "JWT and malware scanning are concrete controls.",
+            },
+            "implementation_review": {
+                "features_built": ["Upload flow", "Feedback report generation"],
+                "technical_quality": "The implementation appears coherent overall.",
+                "integration_quality": "The report describes meaningful integration across services.",
+            },
+            "evaluation_review": {
+                "testing_present": "Functional and regression tests are both mentioned.",
+                "limitations": "Scalability limits need deeper discussion.",
+                "academic_quality": "The report is specific but some justifications stay brief.",
+            },
+            "improvements": [
+                "Explain the orchestration boundary between retrieval, graph flow, and scoring more explicitly."
+            ],
+            "checklist": [
+                "Add a short architecture rationale subsection.",
+                "Expand scalability evaluation evidence."
+            ],
+            "confidence_0_to_4": 3,
+            "safe_review": False,
+            "safety_reason": "",
+        },
+        safe_mode=False,
+    )
+
+    assert normalized["architecture_review"]["backend"] == "FastAPI services coordinate the core report flow."
+    assert normalized["implementation_review"]["features_built"] == ["Upload flow", "Feedback report generation"]
+    assert normalized["evaluation_review"]["limitations"] == "Scalability limits need deeper discussion."
+    assert normalized["improvement_plan"][0]["action"] == "Explain the orchestration boundary between retrieval, graph flow, and scoring more explicitly."
+    assert normalized["checklist"][0]["item"] == "Add a short architecture rationale subsection."
+    assert normalized["model_agreement"]["ml_confidence"] == pytest.approx(0.75)
+
+
+def test_student_normalization_recovers_nested_plan_and_learning_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service_main = _load_service_main(monkeypatch, LLM_PROVIDER="ollama")
+
+    normalized = service_main._normalize_student_llm_json(
+        {
+            "summary": "The review is grounded but needs clearer evaluation depth.",
+            "strengths": ["The argument is easy to follow."],
+            "weaknesses": ["Testing evaluation stays too brief."],
+            "improvement_plan": {
+                "actions": [
+                    {
+                        "title": "Expand the testing evaluation",
+                        "rationale": "The report names tests but does not explain coverage depth clearly.",
+                        "steps": [
+                            "Add one paragraph on edge cases.",
+                            "Explain what the current tests do not cover.",
+                        ],
+                        "priority": "high",
+                    }
+                ],
+                "timeline": "This week",
+            },
+            "learning_path": {
+                "recommended_practice": ["Add one concise edge-case testing paragraph."],
+                "milestones": [
+                    {
+                        "title": "Re-check the evidence chain",
+                        "objective": "Ensure every major claim is backed by a specific example.",
+                        "activities": ["Link each claim to an explicit test or observation."],
+                    }
+                ],
+            },
+            "confidence": {"score": 0.82, "band": "high"},
+            "safety": {"needs_review": False, "reason": ""},
+        },
+        safe_mode=False,
+    )
+
+    assert normalized["issues"][0]["title"] == "Testing evaluation stays too brief."
+    assert normalized["improvement_plan"][0]["action"] == "Expand the testing evaluation"
+    assert normalized["improvement_plan"][0]["why"] == "The report names tests but does not explain coverage depth clearly."
+    assert "edge cases" in normalized["improvement_plan"][0]["how"]
+    assert normalized["improvement_plan"][0]["priority"] == 1
+    assert normalized["checklist"][0]["item"] == "Add one concise edge-case testing paragraph."
+    assert normalized["confidence"]["overall"] == pytest.approx(0.82)
 
 
 # ---------------------------------------------------------------------------

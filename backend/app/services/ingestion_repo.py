@@ -9,6 +9,19 @@ import httpx
 from app.core.config import settings
 
 
+TRANSIENT_HTTP_STATUS_CODES = {408, 429, 500, 502, 503, 504}
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
 class IngestionRepo:
     """
     - Worker calls: service-role key (SUPABASE_SERVICE_ROLE_KEY)
@@ -17,7 +30,7 @@ class IngestionRepo:
     This repo talks DIRECTLY to Supabase PostgREST/RPC.
     """
 
-    def __init__(self, *, service_role_key: str) -> None:
+    def __init__(self, *, service_role_key: str, client: httpx.AsyncClient | None = None) -> None:
         base = self._resolve_base_url()
         if not base:
             raise RuntimeError("SUPABASE_URL is not configured")
@@ -27,6 +40,7 @@ class IngestionRepo:
 
         self.base = base
         self.service_role_key = service_role_key
+        self._client = client
 
     # -----------------------------
     # Base URL helpers
@@ -107,6 +121,61 @@ class IngestionRepo:
     # -----------------------------
     # HTTP helper with retry
     # -----------------------------
+    def _timeout(self, timeout: float) -> httpx.Timeout:
+        return httpx.Timeout(
+            connect=_env_float("INGESTION_HTTP_CONNECT_TIMEOUT_SECONDS", 30.0),
+            read=_env_float("INGESTION_HTTP_READ_TIMEOUT_SECONDS", timeout),
+            write=_env_float("INGESTION_HTTP_WRITE_TIMEOUT_SECONDS", timeout),
+            pool=_env_float("INGESTION_HTTP_POOL_TIMEOUT_SECONDS", 30.0),
+        )
+
+    async def _post_json(
+        self,
+        *,
+        url: str,
+        headers: Dict[str, str],
+        payload: Dict[str, Any],
+        timeout: float,
+    ) -> httpx.Response:
+        request_timeout = self._timeout(timeout)
+        if self._client is not None:
+            return await self._client.post(url, headers=headers, json=payload, timeout=request_timeout)
+
+        async with httpx.AsyncClient(timeout=request_timeout) as client:
+            return await client.post(url, headers=headers, json=payload)
+
+    async def _get_json(
+        self,
+        *,
+        url: str,
+        headers: Dict[str, str],
+        params: Dict[str, Any] | None,
+        timeout: float,
+    ) -> httpx.Response:
+        request_timeout = self._timeout(timeout)
+        if self._client is not None:
+            return await self._client.get(url, headers=headers, params=params, timeout=request_timeout)
+
+        async with httpx.AsyncClient(timeout=request_timeout) as client:
+            return await client.get(url, headers=headers, params=params)
+
+    async def _sleep_before_retry(
+        self,
+        *,
+        attempt: int,
+        response: httpx.Response | None = None,
+    ) -> None:
+        retry_after = response.headers.get("retry-after") if response is not None else None
+        if retry_after:
+            try:
+                await asyncio.sleep(float(retry_after))
+                return
+            except ValueError:
+                pass
+
+        base_sleep = _env_float("INGESTION_HTTP_RETRY_BASE_SLEEP", 1.5)
+        await asyncio.sleep(base_sleep * (2 ** (attempt - 1)))
+
     async def _post_rpc(
         self,
         *,
@@ -118,16 +187,18 @@ class IngestionRepo:
     ) -> httpx.Response:
         url = self._rpc_url(rpc_name)
 
-        # helpful debug line in container logs
-        print(f"[IngestionRepo] POST RPC -> {url}")
-
         last_exc: Exception | None = None
-        backoff = 0.5
 
         for attempt in range(1, retries + 1):
             try:
-                async with httpx.AsyncClient(timeout=httpx.Timeout(timeout)) as client:
-                    resp = await client.post(url, headers=headers, json=payload)
+                resp = await self._post_json(url=url, headers=headers, payload=payload, timeout=timeout)
+                if resp.status_code in TRANSIENT_HTTP_STATUS_CODES and attempt < retries:
+                    print(
+                        f"[IngestionRepo] RPC attempt {attempt}/{retries} got "
+                        f"{resp.status_code} for {rpc_name}; retrying"
+                    )
+                    await self._sleep_before_retry(attempt=attempt, response=resp)
+                    continue
                 return resp
 
             except (
@@ -140,8 +211,7 @@ class IngestionRepo:
                 last_exc = e
                 print(f"[IngestionRepo] RPC attempt {attempt}/{retries} failed for {rpc_name}: {type(e).__name__}: {e}")
                 if attempt < retries:
-                    await asyncio.sleep(backoff)
-                    backoff *= 2
+                    await self._sleep_before_retry(attempt=attempt)
 
         raise RuntimeError(
             f"RPC call failed after retries: {rpc_name}: url={url} error={type(last_exc).__name__ if last_exc else 'Unknown'}: {last_exc}"
@@ -154,20 +224,33 @@ class IngestionRepo:
         headers: Dict[str, str],
         params: Dict[str, Any] | None = None,
         timeout: float = 20.0,
+        retries: int = 5,
     ) -> httpx.Response:
-        print(f"[IngestionRepo] GET -> {url}")
+        last_exc: Exception | None = None
 
-        try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(timeout)) as client:
-                return await client.get(url, headers=headers, params=params)
-        except (
-            httpx.ConnectTimeout,
-            httpx.ConnectError,
-            httpx.ReadTimeout,
-            httpx.RemoteProtocolError,
-            httpx.NetworkError,
-        ) as e:
-            raise RuntimeError(f"GET request failed: url={url} error={type(e).__name__}: {e}") from e
+        for attempt in range(1, retries + 1):
+            try:
+                resp = await self._get_json(url=url, headers=headers, params=params, timeout=timeout)
+                if resp.status_code in TRANSIENT_HTTP_STATUS_CODES and attempt < retries:
+                    print(f"[IngestionRepo] GET attempt {attempt}/{retries} got {resp.status_code} for {url}; retrying")
+                    await self._sleep_before_retry(attempt=attempt, response=resp)
+                    continue
+                return resp
+            except (
+                httpx.ConnectTimeout,
+                httpx.ConnectError,
+                httpx.ReadTimeout,
+                httpx.RemoteProtocolError,
+                httpx.NetworkError,
+            ) as e:
+                last_exc = e
+                print(f"[IngestionRepo] GET attempt {attempt}/{retries} failed for {url}: {type(e).__name__}: {e}")
+                if attempt < retries:
+                    await self._sleep_before_retry(attempt=attempt)
+
+        raise RuntimeError(
+            f"GET request failed after retries: url={url} error={type(last_exc).__name__ if last_exc else 'Unknown'}: {last_exc}"
+        ) from last_exc
 
     # -----------------------------
     # USER RPC: create job

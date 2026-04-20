@@ -68,7 +68,14 @@ async def test_student_generation_chain_uses_llm_service_proxy(monkeypatch: pyte
     assert sink["json"]["role"] == "student"
     assert sink["json"]["temperature"] == phase10_settings.student_temperature
     assert sink["json"]["requested_model"] == phase10_settings.primary_model
-    assert sink["json"]["options"]["num_predict"] == phase10_settings.student_max_output_tokens
+    assert sink["json"]["options"]["num_predict"] == phase10_settings.output_tokens_for(
+        "student",
+        submission_chars=len("student prompt"),
+    )
+    assert sink["json"]["options"]["num_ctx"] == phase10_settings.ollama_num_ctx
+    assert sink["json"]["options"]["top_p"] == phase10_settings.ollama_top_p
+    assert sink["json"]["options"]["top_k"] == phase10_settings.ollama_top_k
+    assert sink["json"]["options"]["repeat_penalty"] == phase10_settings.ollama_repeat_penalty
     assert sink["headers"]["x-ai-secret"]
 
 
@@ -88,7 +95,33 @@ async def test_professor_generation_chain_applies_professor_temperature(monkeypa
     assert sink["json"]["role"] == "professor"
     assert sink["json"]["temperature"] == phase10_settings.professor_temperature
     assert sink["json"]["requested_model"] == phase10_settings.fallback_model
-    assert sink["json"]["options"]["num_predict"] == phase10_settings.professor_max_output_tokens
+    assert sink["json"]["options"]["num_predict"] == phase10_settings.output_tokens_for(
+        "professor",
+        submission_chars=len("professor prompt"),
+    )
+
+
+@pytest.mark.asyncio
+async def test_generation_chain_scales_output_budget_from_submission_size(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sink: dict[str, Any] = {}
+
+    monkeypatch.setattr("app.langchain.services.chain_factory.settings.llm_service_secret", "test-secret")
+    monkeypatch.setattr(
+        "app.langchain.services.chain_factory.httpx.AsyncClient",
+        lambda *args, **kwargs: _FakeAsyncClient(sink, *args, **kwargs),
+    )
+
+    chain = build_generation_chain(build_student_model())
+    await chain.ainvoke({"prompt_text": "student prompt", "submission_chars": 1500})
+    short_budget = sink["json"]["options"]["num_predict"]
+
+    await chain.ainvoke({"prompt_text": "student prompt", "submission_chars": 9000})
+    long_budget = sink["json"]["options"]["num_predict"]
+
+    assert short_budget == phase10_settings.output_tokens_for("student", submission_chars=1500)
+    assert long_budget == phase10_settings.output_tokens_for("student", submission_chars=9000)
 
 
 class _TimeoutAsyncClient:

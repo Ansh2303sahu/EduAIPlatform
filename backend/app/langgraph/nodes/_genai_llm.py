@@ -28,7 +28,12 @@ async def invoke_json_prompt(
     )
     chain = build_generation_chain(model)
     try:
-        raw_text = await chain.ainvoke({"prompt_text": prompt_text})
+        raw_text = await chain.ainvoke(
+            {
+                "prompt_text": prompt_text,
+                "submission_chars": len(prompt_text),
+            }
+        )
     except Exception as exc:
         return None, model_name, str(exc)
 

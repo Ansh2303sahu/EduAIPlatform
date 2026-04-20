@@ -120,6 +120,81 @@ class TestBuildQueries:
         assert len(queries) >= 3
 
 
+class TestPhase7SubmissionFocusedQuery:
+    def test_project_query_keeps_project_anchor_for_title_heavy_submission(self):
+        from app.api import phase7
+
+        ingestion = {
+            "text_content": (
+                "EduAIPlatform A Locally Deployable AI-Driven Feedback System for Higher Education "
+                "Final Report: Introduction | Literature Review | System Architecture | Methodology | "
+                "ARU Harvard Referencing Style | 40+ sources. "
+                "The implemented system uses FastAPI, React, Docker, analytics dashboards, and testing."
+            )
+        }
+
+        query = phase7._student_project_query(ingestion)
+        lowered = query.lower()
+
+        assert "student software engineering project architecture" in lowered
+        assert "architecture" in lowered
+        assert "harvard referencing style" not in lowered
+        assert query != " ".join((ingestion["text_content"] or "").split())[:200]
+
+    def test_academic_query_falls_back_to_base_when_excerpt_has_no_academic_anchor(self):
+        from app.api import phase7
+
+        ingestion = {"text_content": "Appendix A | Contents | Page 1 | Submitted on time"}
+        query = phase7._student_academic_query(ingestion)
+
+        assert query == (
+            "student academic writing structure argument evidence "
+            "critical analysis clarity referencing citation"
+        )
+
+
+class TestSubmissionFormRouting:
+    def test_chapter_like_academic_submission_is_not_routed_as_code(self):
+        from app.services.report_generation_support import (
+            classify_submission_form,
+            detect_submission_kind,
+        )
+
+        ingestion = {
+            "text_content": (
+                "Introduction\n\n"
+                "Background and Context\n\n"
+                "This chapter examines formative feedback in higher education and the tension between timeliness "
+                "and pedagogical depth in automated feedback systems. The discussion reviews related literature, "
+                "frames the argument in academic prose, and cites prior work throughout the chapter (Smith, 2024). "
+                "A later section discusses system architecture and testing, but the chapter remains prose-led and "
+                "citation-heavy rather than code-heavy.\n\n"
+                "References"
+            )
+        }
+
+        assert classify_submission_form(ingestion) == "chapter"
+        assert detect_submission_kind(ingestion) == "academic"
+
+    def test_technical_exercise_summary_routes_as_code_project(self):
+        from app.services.report_generation_support import (
+            classify_submission_form,
+            detect_submission_kind,
+        )
+
+        ingestion = {
+            "text_content": (
+                "Week 1 This exercise introduced basic drawing using WinForms and the System.Drawing library. "
+                "Various shapes such as triangles, rectangles, ellipses, and polygons were created. "
+                "Week 2 This exercise demonstrates recursive drawing of triangles using midpoint calculations. "
+                "This highlights recursion and geometric subdivision techniques commonly used in computer graphics."
+            )
+        }
+
+        assert classify_submission_form(ingestion) == "code"
+        assert detect_submission_kind(ingestion) == "project"
+
+
 # ---------------------------------------------------------------------------
 # context_builder keyword extraction tests
 # ---------------------------------------------------------------------------
@@ -192,6 +267,197 @@ class TestKeywordExtraction:
             mode="code",
         )
         assert any("moving average" in kw or "alert engine" in kw for kw in kws)
+
+    def test_technical_exercise_keywords_drop_weekly_scaffold_noise(self):
+        from app.rag.retrieval.context_builder import _extract_submission_keywords
+
+        text = (
+            "Week 1 This exercise introduced basic drawing using WinForms and the System.Drawing library. "
+            "Week 2 This exercise demonstrates recursive drawing of triangles using midpoint calculations."
+        )
+        kws = _extract_submission_keywords(
+            text,
+            analysis_type="student_project_review",
+            audience="student",
+            title_hint="Week 1 WinForms recursive drawing exercise",
+            mode="code",
+        )
+
+        assert "week" not in kws
+        assert "exercise" not in kws
+        assert any(
+            kw in kws
+            for kw in ["winforms", "system.drawing", "recursive drawing", "midpoint calculations", "midpoint"]
+        )
+
+
+class TestContextBuilderGrounding:
+    def test_student_rag_payload_derives_query_from_submission_text(self, monkeypatch):
+        from app.rag.retrieval import context_builder
+        from app.rag.schemas import RetrievalResult, RetrievalTrace
+
+        captured: dict[str, object] = {}
+
+        def _fake_retrieve_student_context(**kwargs):
+            captured.update(kwargs)
+            return RetrievalResult(
+                audience="student",
+                query=kwargs["query"],
+                chunks=[],
+                citations=[],
+                confidence_score=0.82,
+                confidence_label="high",
+                trace=RetrievalTrace(
+                    audience="student",
+                    query=kwargs["query"],
+                    mode=kwargs["mode"],
+                    keywords_used=list(kwargs["keywords"]),
+                    title_hint=kwargs["title_hint"],
+                    text_excerpt=kwargs["text_excerpt"],
+                ),
+                safe_review=False,
+            )
+
+        monkeypatch.setattr(context_builder, "retrieve_student_context", _fake_retrieve_student_context)
+        body = {
+            "query": "student architecture implementation testing security",
+            "ingestion": {
+                "text_content": (
+                    "Introduction\n\n"
+                    "This chapter explores formative feedback in higher education, focusing on automated feedback, "
+                    "timeliness, and pedagogical depth. The introduction argues that faster feedback is not enough "
+                    "without stronger educational value and cites recent higher-education studies (Smith, 2024)."
+                )
+            },
+        }
+
+        payload = context_builder.build_student_rag_payload(body)
+        query = str(captured["query"]).lower()
+
+        assert captured["mode"] == "chapter"
+        assert "formative feedback" in query or "higher education" in query
+        assert query != "student architecture implementation testing security"
+        assert payload["trace"]["grounding_rejected"] is True
+
+    def test_student_rag_payload_routes_technical_exercise_summary_to_project_queries(self, monkeypatch):
+        from app.rag.retrieval import context_builder
+        from app.rag.schemas import RetrievalResult, RetrievalTrace
+
+        captured: dict[str, object] = {}
+
+        def _fake_retrieve_student_context(**kwargs):
+            captured.update(kwargs)
+            return RetrievalResult(
+                audience="student",
+                query=kwargs["query"],
+                chunks=[],
+                citations=[],
+                confidence_score=0.74,
+                confidence_label="medium",
+                trace=RetrievalTrace(
+                    audience="student",
+                    query=kwargs["query"],
+                    mode=kwargs["mode"],
+                    keywords_used=list(kwargs["keywords"]),
+                    title_hint=kwargs["title_hint"],
+                    text_excerpt=kwargs["text_excerpt"],
+                ),
+                safe_review=False,
+            )
+
+        monkeypatch.setattr(context_builder, "retrieve_student_context", _fake_retrieve_student_context)
+        body = {
+            "ingestion": {
+                "text_content": (
+                    "Week 1 This exercise introduced basic drawing using WinForms and the System.Drawing library. "
+                    "Various shapes such as triangles, rectangles, ellipses, and polygons were created. "
+                    "Week 2 This exercise demonstrates recursive drawing of triangles using midpoint calculations. "
+                    "This highlights recursion and geometric subdivision techniques commonly used in computer graphics."
+                )
+            }
+        }
+
+        payload = context_builder.build_student_rag_payload(body)
+        query = str(captured["query"]).lower()
+
+        assert captured["mode"] == "code"
+        assert any(term in query for term in ["winforms", "system.drawing", "recursion", "midpoint"])
+        assert "academic writing" not in query
+        assert "software_engineering" in captured["preferred_categories"]
+        assert payload["trace"]["grounding_rejected"] is True
+
+    def test_student_rag_payload_rejects_generic_off_topic_chunks(self, monkeypatch):
+        from app.rag.retrieval import context_builder
+        from app.rag.schemas import CitationOut, RetrievedChunk, RetrievalResult, RetrievalTrace
+
+        def _fake_retrieve_student_context(**kwargs):
+            return RetrievalResult(
+                audience="student",
+                query=kwargs["query"],
+                chunks=[
+                    RetrievedChunk(
+                        chunk_id="chunk-1",
+                        document_id="doc-1",
+                        document_title="Generic Writing Guide",
+                        section="Advice",
+                        category="writing",
+                        audience="student",
+                        content="Use clear structure, coherent paragraphs, and evidence where appropriate.",
+                        score=0.88,
+                    ),
+                    RetrievedChunk(
+                        chunk_id="chunk-2",
+                        document_id="doc-2",
+                        document_title="Generic Referencing Guide",
+                        section="Advice",
+                        category="referencing",
+                        audience="student",
+                        content="Follow the chosen referencing style consistently and support claims with evidence.",
+                        score=0.84,
+                    ),
+                ],
+                citations=[
+                    CitationOut(
+                        title="Generic Writing Guide",
+                        section="Advice",
+                        document_id="doc-1",
+                        chunk_id="chunk-1",
+                        category="writing",
+                        score=0.88,
+                    )
+                ],
+                confidence_score=0.87,
+                confidence_label="high",
+                trace=RetrievalTrace(
+                    audience="student",
+                    query=kwargs["query"],
+                    mode=kwargs["mode"],
+                    keywords_used=list(kwargs["keywords"]),
+                    title_hint=kwargs["title_hint"],
+                    text_excerpt=kwargs["text_excerpt"],
+                ),
+                safe_review=False,
+            )
+
+        monkeypatch.setattr(context_builder, "retrieve_student_context", _fake_retrieve_student_context)
+        payload = context_builder.build_student_rag_payload(
+            {
+                "ingestion": {
+                    "text_content": (
+                        "Introduction\n\n"
+                        "This chapter investigates formative feedback in higher education and how automated feedback "
+                        "can improve timeliness without sacrificing pedagogical depth or dialogic support."
+                    )
+                }
+            }
+        )
+
+        assert payload["context"] == ""
+        assert payload["retrieved_chunks"] == []
+        assert payload["citations"] == []
+        assert payload["safe_review"] is True
+        assert payload["confidence_label"] == "low"
+        assert "insufficient_topic_alignment" in payload["trace"]["grounding_rejection_reasons"]
 
 
 # ---------------------------------------------------------------------------
@@ -279,7 +545,8 @@ class TestContextBuilderFallbacks:
         assert isinstance(captured["text_excerpt"], str) and len(str(captured["text_excerpt"])) > 0
         assert isinstance(captured["keywords"], list) and len(captured["keywords"]) > 0
         assert captured["title_hint"]
-        assert payload["trace"] == {"ok": True}
+        assert payload["trace"]["ok"] is True
+        assert payload["trace"]["grounding_rejected"] is True
 
     def test_professor_policy_mode_prefers_policy_categories(self, monkeypatch):
         from app.rag.retrieval import context_builder

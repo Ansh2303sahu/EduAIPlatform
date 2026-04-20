@@ -78,15 +78,48 @@ class SafetySummary(BaseModel):
     reason: str = ""
 
 
+class FeedbackCard(BaseModel):
+    title: str = ""
+    detail: str = ""
+    severity: Literal["low", "medium", "high"] | None = None
+
+
+class SectionFeedback(BaseModel):
+    section_name: str = ""
+    what_works: str = ""
+    what_needs_improvement: str = ""
+    recommended_fix: str = ""
+
+
+class PriorityIssue(BaseModel):
+    title: str = ""
+    why_it_matters: str = ""
+    how_to_fix_it: str = ""
+
+
+class SectionObservation(BaseModel):
+    section_name: str = ""
+    observation: str = ""
+    concern: str = ""
+    next_step: str = ""
+
+
 class StudentReport(StructuredFeedbackBlock):
     """Structured student-facing report."""
 
     report_type: Literal["student"] = "student"
     summary: str = ""
+    overall_judgment: str = ""
     issues: list[dict[str, Any]] = Field(default_factory=list)
+    strength_cards: list[FeedbackCard] = Field(default_factory=list)
+    weakness_cards: list[FeedbackCard] = Field(default_factory=list)
+    section_feedback: list[SectionFeedback] = Field(default_factory=list)
+    priority_issue: PriorityIssue = Field(default_factory=PriorityIssue)
     improvement_plan: ImprovementPlan = Field(default_factory=ImprovementPlan)
     learning_path: LearningPath = Field(default_factory=LearningPath)
     confidence: ReportConfidence = Field(default_factory=ReportConfidence)
+    confidence_explanation: str = ""
+    evidence_coverage: str = ""
     reasoning_summary: list[str] = Field(default_factory=list)
     counterfactual_explanation: str = ""
     safety: SafetySummary = Field(default_factory=SafetySummary)
@@ -97,10 +130,18 @@ class ProfessorModerationReport(StructuredFeedbackBlock):
 
     report_type: Literal["professor"] = "professor"
     summary: str = ""
+    evaluator_overview: str = ""
     feedback_explanation: str = ""
     moderation_notes: list[str] = Field(default_factory=list)
     rubric_alignment: list[str] = Field(default_factory=list)
+    strength_cards: list[FeedbackCard] = Field(default_factory=list)
+    concern_cards: list[FeedbackCard] = Field(default_factory=list)
+    section_observations: list[SectionObservation] = Field(default_factory=list)
+    marking_considerations: list[str] = Field(default_factory=list)
+    action_recommendations: list[str] = Field(default_factory=list)
     confidence: ReportConfidence = Field(default_factory=ReportConfidence)
+    confidence_explanation: str = ""
+    evidence_coverage: str = ""
     reasoning_summary: list[str] = Field(default_factory=list)
     counterfactual_explanation: str = ""
     safety: SafetySummary = Field(default_factory=SafetySummary)
@@ -189,6 +230,8 @@ class FairnessTab(BaseModel):
 class AuditTab(BaseModel):
     """Compact audit/versioning payload."""
 
+    model_config = {"protected_namespaces": ()}
+
     request_id: str = ""
     execution_id: str = ""
     role: ReportType
@@ -268,6 +311,164 @@ class AuditResponse(BaseModel):
     role: ReportType
     audit: AuditTab
     warnings: list[str] = Field(default_factory=list)
+
+
+class AICheckSummary(BaseModel):
+    """Top-level summary shown in the frontend AI check panel."""
+
+    selected_pipeline: str = "none"
+    status: str = "not_available"
+    created_at: str | None = None
+    needs_review: bool = False
+    confidence_score: float | None = Field(default=None, ge=0.0, le=1.0)
+    confidence_band: ConfidenceBand | None = None
+    report_summary: str = ""
+
+
+class AICheckLangChain(BaseModel):
+    """Compact LangChain execution view for the frontend."""
+
+    model_config = {"protected_namespaces": ()}
+
+    available: bool = False
+    pipeline: str = ""
+    chain_name: str = ""
+    chain_version: str = ""
+    prompt_version: str = ""
+    schema_version: str = ""
+    provider: str = ""
+    model_used: str = ""
+    primary_model: str = ""
+    fallback_model: str = ""
+    fallback_used: bool = False
+    execution_mode: str = ""
+    decision_source: str = ""
+    discrepancy_flag: bool | None = None
+    retrieval_mode: str = ""
+    retrieved_chunk_count: int = 0
+    confidence_score: float | None = Field(default=None, ge=0.0, le=1.0)
+    summary: str = ""
+
+
+class AICheckLangGraph(BaseModel):
+    """Compact LangGraph execution view for the frontend."""
+
+    available: bool = False
+    pipeline: str = ""
+    graph_name: str = ""
+    graph_version: str = ""
+    prompt_version: str = ""
+    output_version: str = ""
+    final_status: str = ""
+    safe_mode: bool = False
+    total_steps: int = 0
+    total_latency_ms: float = 0.0
+    node_count: int = 0
+    decision_count: int = 0
+    failure_count: int = 0
+    trace_summary: str = ""
+    warnings: list[str] = Field(default_factory=list)
+
+
+class AICheckGenAI(BaseModel):
+    """GenAI prediction summary extracted from a stored Phase 15/16 row."""
+
+    model_config = {"protected_namespaces": ()}
+
+    available: bool = False
+    pipeline: str = ""
+    model_version: str = ""
+    validator_model_version: str = ""
+    final_status: str = ""
+    confidence_score: float | None = Field(default=None, ge=0.0, le=1.0)
+    confidence_band: ConfidenceBand | None = None
+    report_summary: str = ""
+    warning_count: int = 0
+
+
+class AICheckRAG(BaseModel):
+    """Grounding and retrieval summary."""
+
+    enabled: bool = False
+    confidence_score: float | None = Field(default=None, ge=0.0, le=1.0)
+    confidence_label: str = ""
+    citations_count: int = 0
+    retrieved_chunk_count: int = 0
+    query: str = ""
+    collection_name: str = ""
+    safe_review: bool = False
+    summary: str = ""
+
+
+class AICheckML(BaseModel):
+    """ML calibration summary."""
+
+    model_config = {"protected_namespaces": ()}
+
+    available: bool = False
+    confidence_score: float | None = Field(default=None, ge=0.0, le=1.0)
+    model_names: list[str] = Field(default_factory=list)
+    source: str = ""
+    summary: str = ""
+
+
+class AICheckLLM(BaseModel):
+    """LLM routing summary."""
+
+    model_config = {"protected_namespaces": ()}
+
+    available: bool = False
+    model_used: str = ""
+    primary_model: str = ""
+    fallback_model: str = ""
+    route: str = ""
+    source: str = ""
+
+
+class AICheckMCP(BaseModel):
+    """MCP capability and graph-usage summary."""
+
+    enabled: bool = False
+    orchestration_enabled: bool = False
+    llm_enabled: bool = False
+    graph_used: bool = False
+    tool_call_count: int = 0
+    visible_tools: list[str] = Field(default_factory=list)
+    summary: str = ""
+
+
+class AICheckN8NIntegrations(BaseModel):
+    """Per-integration n8n wiring flags."""
+
+    assessment: bool = False
+    file_upload: bool = False
+    low_confidence: bool = False
+    pipeline_failure: bool = False
+
+
+class AICheckN8N(BaseModel):
+    """n8n workflow bridge summary."""
+
+    configured: bool = False
+    generation_bridge_active: bool = False
+    integrations: AICheckN8NIntegrations = Field(default_factory=AICheckN8NIntegrations)
+    summary: str = ""
+
+
+class AICheckResponse(BaseModel):
+    """Unified AI check payload for the frontend."""
+
+    file_id: str
+    role: ReportType
+    summary: AICheckSummary = Field(default_factory=AICheckSummary)
+    langchain: AICheckLangChain = Field(default_factory=AICheckLangChain)
+    langgraph: AICheckLangGraph = Field(default_factory=AICheckLangGraph)
+    genai: AICheckGenAI = Field(default_factory=AICheckGenAI)
+    rag: AICheckRAG = Field(default_factory=AICheckRAG)
+    ml: AICheckML = Field(default_factory=AICheckML)
+    llm: AICheckLLM = Field(default_factory=AICheckLLM)
+    mcp: AICheckMCP = Field(default_factory=AICheckMCP)
+    n8n: AICheckN8N = Field(default_factory=AICheckN8N)
 
 
 class PlanSection(BaseModel):

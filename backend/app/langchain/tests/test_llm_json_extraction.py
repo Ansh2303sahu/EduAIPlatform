@@ -176,7 +176,7 @@ Generating feedback for the student submission...
 }
 ```
 
-I hope this feedback is useful. The model used gemma3:latest for this generation.
+I hope this feedback is useful. The model used gemma3:4b for this generation.
 """
     result = _extract_json_text_service(raw)
     parsed = json.loads(result)
@@ -277,26 +277,26 @@ def _make_professor_safe_fallback(model_used: str) -> dict[str, Any]:
 
 
 def test_student_fallback_has_all_required_keys():
-    fb = _make_student_safe_fallback("gemma3:latest")
+    fb = _make_student_safe_fallback("gemma3:4b")
     missing = _REQUIRED_STUDENT_KEYS - set(fb.keys())
     assert missing == set(), f"Missing keys: {missing}"
 
 
 def test_student_fallback_safety_needs_review():
-    fb = _make_student_safe_fallback("gemma3:latest")
+    fb = _make_student_safe_fallback("gemma3:4b")
     assert fb["safety"]["needs_review"] is True
     assert fb["confidence"]["mode"] == "restricted"
     assert fb["model_agreement"]["final_confidence"] == 0.0
 
 
 def test_professor_fallback_has_all_required_keys():
-    fb = _make_professor_safe_fallback("mistral:latest")
+    fb = _make_professor_safe_fallback("phi3:mini")
     missing = _REQUIRED_PROFESSOR_KEYS - set(fb.keys())
     assert missing == set(), f"Missing keys: {missing}"
 
 
 def test_professor_fallback_safety_needs_review():
-    fb = _make_professor_safe_fallback("mistral:latest")
+    fb = _make_professor_safe_fallback("phi3:mini")
     assert fb["safety"]["needs_review"] is True
     assert len(fb["rubric_breakdown"]) >= 1
 

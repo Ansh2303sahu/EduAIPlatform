@@ -110,15 +110,41 @@ def _prompt_to_text(value: Any) -> str:
     return str(value)
 
 
-async def _call_llm_service(spec: _LLMServiceModelSpec, prompt_text: str) -> AIMessage:
+def _as_input_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _generation_options(spec: _LLMServiceModelSpec, prompt_input: Any, prompt_text: str) -> dict[str, Any]:
+    data = _as_input_dict(prompt_input)
+    caller_options = data.get("generation_options") or data.get("options") or {}
+    if not isinstance(caller_options, dict):
+        caller_options = {}
+
+    submission_chars = data.get("submission_chars")
+    try:
+        submission_size = max(0, int(submission_chars))
+    except (TypeError, ValueError):
+        submission_size = len(prompt_text)
+
+    options = {
+        "num_predict": phase10_settings.output_tokens_for(spec.role, submission_chars=submission_size),
+        "num_ctx": phase10_settings.ollama_num_ctx,
+        "top_p": phase10_settings.ollama_top_p,
+        "top_k": phase10_settings.ollama_top_k,
+        "repeat_penalty": phase10_settings.ollama_repeat_penalty,
+    }
+    options.update({key: value for key, value in caller_options.items() if value is not None})
+    return options
+
+
+async def _call_llm_service(spec: _LLMServiceModelSpec, prompt_input: Any) -> AIMessage:
+    prompt_text = _prompt_to_text(_as_input_dict(prompt_input).get("prompt_text", prompt_input))
     payload = {
         "prompt": prompt_text,
         "role": spec.role,
         "temperature": spec.temperature,
         "requested_model": spec.model_name,
-        "options": {
-            "num_predict": phase10_settings.output_tokens_for(spec.role),
-        },
+        "options": _generation_options(spec, prompt_input, prompt_text),
     }
     timeout = httpx.Timeout(
         connect=min(spec.timeout_seconds, 15.0),
@@ -177,7 +203,7 @@ async def _call_llm_service(spec: _LLMServiceModelSpec, prompt_text: str) -> AIM
 
 def _build_proxy_model(spec: _LLMServiceModelSpec) -> Runnable[Any, AIMessage]:
     async def _ainvoke(prompt_input: Any) -> AIMessage:
-        prompt_text = _prompt_to_text(prompt_input)
+        prompt_text = _prompt_to_text(_as_input_dict(prompt_input).get("prompt_text", prompt_input))
         logger.debug(
             "chain_factory: proxying role=%s model=%s timeout=%s temperature=%s chars=%d",
             spec.role,
@@ -186,7 +212,7 @@ def _build_proxy_model(spec: _LLMServiceModelSpec) -> Runnable[Any, AIMessage]:
             spec.temperature,
             len(prompt_text),
         )
-        return await _call_llm_service(spec, prompt_text)
+        return await _call_llm_service(spec, prompt_input)
 
     return RunnableLambda(_ainvoke, name=spec.run_name)
 
@@ -293,7 +319,7 @@ def build_generation_chain(model: Runnable[Any, Any]) -> Runnable[Any, str]:
     so we keep the chain lean and avoid wrapping that prompt inside another
     synthetic chat template.
     """
-    return RunnableLambda(_extract_prompt_text, name="phase10_extract_prompt_text") | model | StrOutputParser()
+    return RunnableLambda(lambda inputs: inputs, name="phase10_generation_input") | model | StrOutputParser()
 
 
 def build_repair_chain(model: Runnable[Any, Any]) -> Runnable[Any, str]:

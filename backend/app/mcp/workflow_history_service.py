@@ -29,6 +29,7 @@ from app.mcp.orchestration_schemas import (
     WorkflowResponse,
 )
 from app.mcp.workflow_history_repo import WorkflowHistoryRepo
+from app.services.uuid_normalization import uuid_or_none
 
 
 def _stable_hash(value: object) -> str:
@@ -136,13 +137,14 @@ class WorkflowHistoryService:
         duration_ms: float,
     ) -> None:
         request_meta = _safe_request_meta(workflow_req)
+        workflow_run_uuid = uuid_or_none(workflow_run_id)
         run_row = {
-            "workflow_run_id": workflow_run_id,
+            "workflow_run_id": workflow_run_uuid,
             "workflow_name": workflow_req.workflow_name,
-            "user_id": user_id,
+            "user_id": uuid_or_none(user_id),
             "role": role,
-            "correlation_id": correlation_id,
-            "request_id": request_id,
+            "correlation_id": uuid_or_none(correlation_id),
+            "request_id": uuid_or_none(request_id),
             "final_status": workflow_response.final_status,
             "blocked_reason": (
                 workflow_response.meta.stopped_reason
@@ -183,7 +185,7 @@ class WorkflowHistoryService:
             if step.envelope.ok:
                 step_rows.append(
                     {
-                        "workflow_run_id": workflow_run_id,
+                        "workflow_run_id": workflow_run_uuid,
                         "step_index": step.index,
                         "step_name": step.step_name,
                         "tool_name": step.tool_name,
@@ -200,7 +202,7 @@ class WorkflowHistoryService:
             else:
                 step_rows.append(
                     {
-                        "workflow_run_id": workflow_run_id,
+                        "workflow_run_id": workflow_run_uuid,
                         "step_index": step.index,
                         "step_name": step.step_name,
                         "tool_name": step.tool_name,

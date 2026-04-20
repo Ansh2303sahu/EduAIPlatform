@@ -217,6 +217,101 @@ def _replace_tokens_outside_strings(text: str, replacements: dict[str, str]) -> 
     return "".join(result)
 
 
+def _next_significant_char(text: str, start: int) -> str:
+    idx = max(start, 0)
+    while idx < len(text):
+        ch = text[idx]
+        if not ch.isspace():
+            return ch
+        idx += 1
+    return ""
+
+
+def _next_token_looks_like_bare_key(text: str, start: int) -> bool:
+    idx = max(start, 0)
+    while idx < len(text) and text[idx].isspace():
+        idx += 1
+    if idx >= len(text):
+        return False
+    if not (text[idx].isalpha() or text[idx] == "_"):
+        return False
+
+    idx += 1
+    while idx < len(text) and (text[idx].isalnum() or text[idx] in {"_", "-", " "}):
+        idx += 1
+    while idx < len(text) and text[idx].isspace():
+        idx += 1
+    return idx < len(text) and text[idx] == ":"
+
+
+def _next_token_looks_like_quoted_key(text: str, start: int) -> bool:
+    idx = max(start, 0)
+    while idx < len(text) and text[idx].isspace():
+        idx += 1
+    if idx >= len(text) or text[idx] != '"':
+        return False
+
+    idx += 1
+    escaped = False
+    while idx < len(text):
+        ch = text[idx]
+        if escaped:
+            escaped = False
+        elif ch == "\\":
+            escaped = True
+        elif ch == '"':
+            idx += 1
+            break
+        idx += 1
+
+    while idx < len(text) and text[idx].isspace():
+        idx += 1
+    return idx < len(text) and text[idx] == ":"
+
+
+def _escape_inner_quotes(text: str) -> str:
+    """Escape quote characters that look like literal content inside JSON strings."""
+
+    result: list[str] = []
+    in_string = False
+    escaped = False
+
+    for idx, ch in enumerate(text):
+        if not in_string:
+            result.append(ch)
+            if ch == '"':
+                in_string = True
+            continue
+
+        if escaped:
+            result.append(ch)
+            escaped = False
+            continue
+
+        if ch == "\\":
+            result.append(ch)
+            escaped = True
+            continue
+
+        if ch == '"':
+            next_char = _next_significant_char(text, idx + 1)
+            if (
+                next_char in {":", ",", "}", "]"}
+                or not next_char
+                or _next_token_looks_like_bare_key(text, idx + 1)
+                or _next_token_looks_like_quoted_key(text, idx + 1)
+            ):
+                result.append(ch)
+                in_string = False
+            else:
+                result.append('\\"')
+            continue
+
+        result.append(ch)
+
+    return "".join(result)
+
+
 def _parse_json_dict(text: str) -> tuple[dict[str, Any] | None, str | None]:
     try:
         parsed = json.loads(text)
@@ -286,8 +381,10 @@ def repair_json_text(raw: str) -> str:
     add_variant(_remove_trailing_commas(base))
     balanced = _balance_json_delimiters(_remove_trailing_commas(base))
     add_variant(balanced)
-    add_variant(_quote_bare_keys(balanced))
-    add_variant(_quote_bare_word_values(_quote_bare_keys(balanced)))
+    escaped = _escape_inner_quotes(balanced)
+    add_variant(escaped)
+    add_variant(_quote_bare_keys(escaped))
+    add_variant(_quote_bare_word_values(_quote_bare_keys(escaped)))
 
     last_error = "Unknown JSON repair failure."
     for variant in variants:

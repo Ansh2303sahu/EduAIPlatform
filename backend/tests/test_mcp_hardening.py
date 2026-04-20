@@ -248,7 +248,7 @@ class TestLLMClientHardening:
             "AsyncClient",
             _fake_async_client_factory(
                 response=_FakeResponse(
-                    json_body={"response": '{"summary":"ok"}', "model_used": "mistral:latest"},
+                    json_body={"response": '{"summary":"ok"}', "model_used": "gemma3:4b"},
                     headers={"x-llm-fallback": "true"},
                 )
             ),
@@ -258,14 +258,14 @@ class TestLLMClientHardening:
 
         assert result.ok is True
         assert result.text == '{"summary":"ok"}'
-        assert result.model_used == "mistral:latest"
+        assert result.model_used == "gemma3:4b"
         assert result.used_fallback is True
 
     def test_parse_json_response_rejects_invalid_json(self):
         from app.mcp.llm_client import LLMCallResult, parse_json_response
 
         parsed = parse_json_response(
-            LLMCallResult(ok=True, text="NOT JSON", model_used="mistral:latest")
+            LLMCallResult(ok=True, text="NOT JSON", model_used="gemma3:4b")
         )
 
         assert parsed.ok is False
@@ -275,7 +275,7 @@ class TestLLMClientHardening:
         from app.mcp.llm_client import LLMCallResult, parse_json_response
 
         parsed = parse_json_response(
-            LLMCallResult(ok=True, text='["not","a","dict"]', model_used="mistral:latest")
+            LLMCallResult(ok=True, text='["not","a","dict"]', model_used="gemma3:4b")
         )
 
         assert parsed.ok is False

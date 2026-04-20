@@ -16,11 +16,12 @@ from app.schemas import (
 from app.security import sanitize_input
 from app.prompts import student_prompt, professor_prompt, fix_json_prompt, student_feedback_style
 
-# Import provider client.  For Ollama we also grab the specific-model caller and
+# Import provider client. For Ollama we also grab the specific-model caller and
 # the fallback model name so JSON-parse failures can be explicitly retried on
-# mistral rather than retrying gemma (which already failed).
+# phi3 rather than retrying gemma (which already failed).
 _generate_with_specific_model = None
 _REPAIR_MODEL: str | None = None
+_get_provider_status = None
 _ACTIVE_PROVIDER = settings.effective_provider
 
 if _ACTIVE_PROVIDER == "anthropic":
@@ -30,6 +31,7 @@ else:
         generate_with_fallback,
         generate_with_specific_model as _generate_with_specific_model,
         OLLAMA_FALLBACK_MODEL as _REPAIR_MODEL,
+        ollama_provider_status as _get_provider_status,
     )
 
 app = FastAPI(title="llm-service", version="1.2")
@@ -54,6 +56,45 @@ class PromptGenerateIn(BaseModel):
 class PromptGenerateOut(BaseModel):
     response: str
     model_used: str
+
+
+def _json_prompt_payload(
+    prompt_text: str,
+    *,
+    num_predict: int | None = None,
+    options: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "prompt": prompt_text,
+        "stream": False,
+        "format": "json",
+    }
+    merged_options: dict[str, Any] = {
+        key: value for key, value in (options or {}).items() if value is not None
+    }
+    if num_predict and num_predict > 0:
+        merged_options["num_predict"] = int(num_predict)
+    if merged_options:
+        payload["options"] = merged_options
+    return payload
+
+
+def _scaled_num_predict(
+    text: str,
+    *,
+    default_tokens: int,
+    maximum_tokens: int | None = None,
+) -> int:
+    chars = len(text or "")
+    if chars <= 2500:
+        target = min(default_tokens, 850)
+    elif chars <= 7000:
+        target = min(default_tokens, 1050)
+    else:
+        target = default_tokens
+    if maximum_tokens and maximum_tokens > 0:
+        return min(target, maximum_tokens)
+    return target
 
 
 def _active_primary_model() -> str:
@@ -84,6 +125,34 @@ def _llm_response_headers(
     if extra:
         headers.update(extra)
     return headers
+
+
+async def _active_provider_status() -> dict[str, Any]:
+    if _ACTIVE_PROVIDER == "anthropic":
+        has_api_key = bool(str(settings.anthropic_api_key or "").strip())
+        return {
+            "provider": "anthropic",
+            "primary_model": str(settings.anthropic_primary_model or ""),
+            "fallback_model": str(settings.anthropic_fallback_model or ""),
+            "has_api_key": has_api_key,
+            "ready": has_api_key,
+        }
+
+    if _get_provider_status is not None:
+        return await _get_provider_status()
+
+    return {"provider": _ACTIVE_PROVIDER, "ready": False}
+
+
+async def _provider_health_payload() -> dict[str, Any]:
+    provider_status = await _active_provider_status()
+    return {
+        "ok": True,
+        "configured_provider": str(settings.llm_provider or ""),
+        "effective_provider": _ACTIVE_PROVIDER,
+        "provider_status": provider_status,
+        "ready": bool(provider_status.get("ready")),
+    }
 
 
 def _check_secret(x_ai_secret: str | None):
@@ -141,6 +210,7 @@ def _cheap_repair(text: str) -> str:
     - Python-style True / False / None literals
     - trailing commas before ] or }
     - bare (unquoted) JSON keys
+    - unescaped inner double quotes inside string values
     """
     # Curly / smart quotes → straight quotes
     text = text.translate(_SMART_QUOTES)
@@ -152,7 +222,152 @@ def _cheap_repair(text: str) -> str:
     text = _TRAILING_COMMA_RE.sub(r"\1", text)
     # Bare keys  e.g.  {summary: "x"}  →  {"summary": "x"}
     text = _BARE_KEY_RE.sub(lambda m: f'{m.group(1)}"{m.group(2).strip()}"{m.group(3)}', text)
+    text = _escape_inner_quotes(text)
     return text
+
+
+def _escape_inner_quotes(text: str) -> str:
+    """Escape quote characters that look like literal content inside JSON strings."""
+
+    result: list[str] = []
+    in_string = False
+    escape_next = False
+
+    for idx, ch in enumerate(text):
+        if not in_string:
+            result.append(ch)
+            if ch == '"':
+                in_string = True
+            continue
+
+        if escape_next:
+            result.append(ch)
+            escape_next = False
+            continue
+
+        if ch == "\\":
+            result.append(ch)
+            escape_next = True
+            continue
+
+        if ch == '"':
+            next_char = _next_significant_char(text, idx + 1)
+            if (
+                next_char in {":", ",", "}", "]"}
+                or not next_char
+                or _next_token_looks_like_bare_key(text, idx + 1)
+                or _next_token_looks_like_quoted_key(text, idx + 1)
+            ):
+                result.append(ch)
+                in_string = False
+            else:
+                result.append('\\"')
+            continue
+
+        result.append(ch)
+
+    return "".join(result)
+
+
+def _previous_significant_char(text: str, pos: int) -> str:
+    idx = min(pos - 1, len(text) - 1)
+    while idx >= 0:
+        ch = text[idx]
+        if not ch.isspace():
+            return ch
+        idx -= 1
+    return ""
+
+
+def _next_significant_char(text: str, pos: int) -> str:
+    idx = max(pos, 0)
+    while idx < len(text):
+        ch = text[idx]
+        if not ch.isspace():
+            return ch
+        idx += 1
+    return ""
+
+
+def _next_token_looks_like_bare_key(text: str, pos: int) -> bool:
+    idx = max(pos, 0)
+    while idx < len(text) and text[idx].isspace():
+        idx += 1
+    if idx >= len(text):
+        return False
+
+    start = text[idx]
+    if not (start.isalpha() or start == "_"):
+        return False
+
+    idx += 1
+    while idx < len(text) and (text[idx].isalnum() or text[idx] in {"_", "-", " "}):
+        idx += 1
+    while idx < len(text) and text[idx].isspace():
+        idx += 1
+    return idx < len(text) and text[idx] == ":"
+
+
+def _next_token_looks_like_quoted_key(text: str, pos: int) -> bool:
+    idx = max(pos, 0)
+    while idx < len(text) and text[idx].isspace():
+        idx += 1
+    if idx >= len(text) or text[idx] != '"':
+        return False
+
+    idx += 1
+    escape_next = False
+    while idx < len(text):
+        ch = text[idx]
+        if escape_next:
+            escape_next = False
+        elif ch == "\\":
+            escape_next = True
+        elif ch == '"':
+            idx += 1
+            break
+        idx += 1
+
+    while idx < len(text) and text[idx].isspace():
+        idx += 1
+    return idx < len(text) and text[idx] == ":"
+
+
+def _comma_boundary_looks_valid(text: str, pos: int) -> bool:
+    prev_char = _previous_significant_char(text, pos)
+    next_char = _next_significant_char(text, pos)
+    if not prev_char or not next_char:
+        return False
+    value_end_chars = set('"}]0123456789eElns')
+    value_start_chars = set('"{[-0123456789tfn')
+    if prev_char not in value_end_chars:
+        return False
+    return next_char in value_start_chars or _next_token_looks_like_bare_key(text, pos)
+
+
+def _repair_missing_commas(text: str, *, max_attempts: int = 16) -> str:
+    """Insert missing commas at JSONDecodeError boundaries when it looks safe."""
+
+    candidate = text
+    for _ in range(max_attempts):
+        try:
+            json.loads(candidate)
+            return candidate
+        except json.JSONDecodeError as exc:
+            if "Expecting ',' delimiter" not in str(exc):
+                raise
+            if exc.pos < 0 or exc.pos > len(candidate):
+                raise
+
+            if not _comma_boundary_looks_valid(candidate, exc.pos):
+                raise
+
+            candidate = candidate[: exc.pos] + "," + candidate[exc.pos :]
+            # Re-run cheap repair so a newly exposed bare key can be quoted on
+            # the next pass before json.loads is attempted again.
+            candidate = _cheap_repair(candidate)
+
+    return candidate
 
 
 def _extract_json_text(raw: str) -> str:
@@ -241,6 +456,278 @@ def _as_list(value: Any) -> list[Any]:
     if isinstance(value, list):
         return value
     return [value]
+
+
+def _coerce_text(value: Any, *, limit: int, default: str = "") -> str:
+    if value is None:
+        text = default
+    elif isinstance(value, str):
+        text = value.strip()
+    else:
+        text = str(value).strip()
+    text = text or default
+    return text[:limit]
+
+
+def _normalize_issue_item(item: Any, index: int) -> dict[str, Any] | None:
+    if isinstance(item, str):
+        text = _coerce_text(item, limit=2000, default="")
+        if not text:
+            return None
+        return {
+            "title": _truncate(text, 200, f"Issue {index + 1}"),
+            "evidence": text,
+            "severity": "med",
+        }
+
+    issue = _as_dict(item)
+    if not issue:
+        return None
+    title = _truncate(
+        _first_present(issue, "title", "issue", "problem", "risk"),
+        200,
+        f"Issue {index + 1}",
+    )
+    evidence = _truncate(
+        _first_present(issue, "evidence", "description", "detail", "text", "note"),
+        2000,
+        title or "Evidence was not provided.",
+    )
+    return {
+        "title": title,
+        "evidence": evidence,
+        "severity": _normalize_severity(issue.get("severity") or issue.get("level") or issue.get("impact")),
+    }
+
+
+def _normalize_strength_item(item: Any, index: int) -> dict[str, Any] | None:
+    if isinstance(item, str):
+        text = _coerce_text(item, limit=2000, default="")
+        if not text:
+            return None
+        return {
+            "title": _truncate(text, 200, f"Strength {index + 1}"),
+            "evidence": text,
+        }
+
+    strength = _as_dict(item)
+    if not strength:
+        return None
+    title = _truncate(
+        _first_present(strength, "title", "strength", "positive", "heading"),
+        200,
+        f"Strength {index + 1}",
+    )
+    evidence = _truncate(
+        _first_present(strength, "evidence", "description", "detail", "text", "note"),
+        2000,
+        title or "Supporting evidence was not provided.",
+    )
+    return {
+        "title": title,
+        "evidence": evidence,
+    }
+
+
+def _normalize_improvement_item(item: Any, index: int) -> dict[str, Any] | None:
+    if isinstance(item, str):
+        text = _coerce_text(item, limit=800, default="")
+        if not text:
+            return None
+        return {
+            "action": _truncate(text, 300, f"Improvement action {index + 1}"),
+            "why": text,
+            "how": "Apply this improvement directly to the submission.",
+            "priority": min(index + 1, 10),
+        }
+
+    action = _as_dict(item)
+    if not action:
+        return None
+    action_text = _truncate(
+        _first_present(action, "action", "item", "title", "recommendation"),
+        300,
+        f"Improvement action {index + 1}",
+    )
+    why = _truncate(
+        _first_present(action, "why", "reason", "benefit", "evidence", "description", "rationale"),
+        800,
+        action_text or "The reason was not provided.",
+    )
+    steps = [
+        _coerce_text(step, limit=200, default="")
+        for step in _as_list(action.get("steps"))
+        if _coerce_text(step, limit=200, default="")
+    ]
+    how_source = _first_present(action, "how", "method", "implementation", "next_step")
+    how = _truncate(
+        how_source if _value_has_meaningful_content(how_source) else "; ".join(steps),
+        800,
+        "The implementation detail was not provided.",
+    )
+    priority_raw = action.get("priority")
+    if isinstance(priority_raw, str):
+        priority_raw = {
+            "high": 1,
+            "medium": 2,
+            "med": 2,
+            "low": 3,
+        }.get(priority_raw.strip().lower(), priority_raw)
+    return {
+        "action": action_text,
+        "why": why,
+        "how": how,
+        "priority": _coerce_int(priority_raw, default=min(index + 1, 10)),
+    }
+
+
+def _normalize_checklist_item(item: Any, index: int) -> dict[str, Any] | None:
+    if isinstance(item, str):
+        text = _coerce_text(item, limit=200, default="")
+        if not text:
+            return None
+        return {"item": text, "done": False}
+
+    check = _as_dict(item)
+    if not check:
+        return None
+    return {
+        "item": _truncate(
+            _first_present(check, "item", "task", "action", "title", "objective"),
+            200,
+            f"Checklist item {index + 1}",
+        ),
+        "done": _coerce_bool(check.get("done"), default=False),
+    }
+
+
+def _student_improvement_candidates(data: dict[str, Any]) -> list[Any]:
+    improvement_plan = _as_dict(data.get("improvement_plan"))
+    actions = _as_list(improvement_plan.get("actions"))
+    if actions:
+        return actions
+
+    for key in ("improvement_plan", "recommendations", "improvements", "next_steps", "actions", "suggestions"):
+        if key == "improvement_plan" and isinstance(data.get(key), dict):
+            continue
+        items = _as_list(data.get(key))
+        if items:
+            return items
+
+    return []
+
+
+def _student_checklist_candidates(data: dict[str, Any]) -> list[Any]:
+    for key in ("checklist", "action_items", "todo"):
+        items = _as_list(data.get(key))
+        if items:
+            return items
+
+    learning_path = _as_dict(data.get("learning_path"))
+    generated: list[Any] = []
+
+    for item in _as_list(learning_path.get("recommended_practice")):
+        if _coerce_text(item, limit=200, default=""):
+            generated.append(item)
+
+    for milestone in _as_list(learning_path.get("milestones")):
+        if isinstance(milestone, str):
+            if milestone.strip():
+                generated.append(milestone)
+            continue
+        milestone_dict = _as_dict(milestone)
+        if not milestone_dict:
+            continue
+        title = _coerce_text(
+            _first_present(milestone_dict, "title", "objective"),
+            limit=200,
+            default="",
+        )
+        if title:
+            generated.append({"item": title, "done": False})
+        for activity in _as_list(milestone_dict.get("activities")):
+            if _coerce_text(activity, limit=200, default=""):
+                generated.append(activity)
+
+    if generated:
+        return generated
+
+    for item in _student_improvement_candidates(data):
+        if isinstance(item, str):
+            if item.strip():
+                generated.append(item)
+            continue
+        item_dict = _as_dict(item)
+        if not item_dict:
+            continue
+        title = _coerce_text(
+            _first_present(item_dict, "action", "title", "item", "step"),
+            limit=200,
+            default="",
+        )
+        if title:
+            generated.append(title)
+
+    return generated
+
+
+def _normalize_rubric_row(item: Any, index: int) -> dict[str, Any] | None:
+    if isinstance(item, str):
+        text = _coerce_text(item, limit=1200, default="")
+        if not text:
+            return None
+        return {
+            "criterion": f"Criterion {index + 1}",
+            "band": "Needs review",
+            "justification": text,
+        }
+
+    row = _as_dict(item)
+    if not row:
+        return None
+    criterion = _truncate(
+        _first_present(row, "criterion", "dimension", "category", "title"),
+        200,
+        f"Criterion {index + 1}",
+    )
+    justification = _truncate(
+        _first_present(row, "justification", "note", "description", "evidence", "text"),
+        1200,
+        "A detailed justification was not provided.",
+    )
+    return {
+        "criterion": criterion,
+        "band": _truncate(_first_present(row, "band", "level", "grade"), 80, "Needs review"),
+        "justification": justification,
+    }
+
+
+def _normalize_moderation_note(item: Any, index: int) -> dict[str, Any] | None:
+    if isinstance(item, str):
+        text = _coerce_text(item, limit=800, default="")
+        if not text:
+            return None
+        return {
+            "risk": _truncate(text, 120, f"Risk {index + 1}"),
+            "note": text,
+        }
+
+    note = _as_dict(item)
+    if not note:
+        return None
+    risk = _truncate(
+        _first_present(note, "risk", "title", "category"),
+        120,
+        f"Risk {index + 1}",
+    )
+    return {
+        "risk": risk,
+        "note": _truncate(
+            _first_present(note, "note", "description", "detail", "text"),
+            800,
+            risk or "A moderation note was not provided.",
+        ),
+    }
 
 
 def _first_present(data: dict[str, Any], *keys: str) -> Any:
@@ -1092,56 +1579,28 @@ def _normalize_student_llm_json(obj: Any, *, safe_mode: bool) -> dict[str, Any]:
         "areas_for_improvement",
     )
     for idx, item in enumerate(_as_list(issues_source)):
-        issue = _as_dict(item)
-        issues.append(
-            {
-                "title": _truncate(issue.get("title"), 200, f"Issue {idx + 1}"),
-                "evidence": _truncate(issue.get("evidence"), 2000, "Evidence was not provided."),
-                "severity": _normalize_severity(issue.get("severity")),
-            }
-        )
+        normalized_issue = _normalize_issue_item(item, idx)
+        if normalized_issue is not None:
+            issues.append(normalized_issue)
 
     strengths = []
     strengths_source = _first_present(data, "strengths", "positives", "key_strengths")
     for idx, item in enumerate(_as_list(strengths_source)):
-        strength = _as_dict(item)
-        strengths.append(
-            {
-                "title": _truncate(strength.get("title"), 200, f"Strength {idx + 1}"),
-                "evidence": _truncate(strength.get("evidence"), 2000, "Supporting evidence was not provided."),
-            }
-        )
+        normalized_strength = _normalize_strength_item(item, idx)
+        if normalized_strength is not None:
+            strengths.append(normalized_strength)
 
     improvement_plan = []
-    improvement_source = _first_present(
-        data,
-        "improvement_plan",
-        "recommendations",
-        "improvements",
-        "next_steps",
-        "actions",
-    )
-    for idx, item in enumerate(_as_list(improvement_source)):
-        action = _as_dict(item)
-        improvement_plan.append(
-            {
-                "action": _truncate(action.get("action"), 300, f"Improvement action {idx + 1}"),
-                "why": _truncate(action.get("why"), 800, "The reason was not provided."),
-                "how": _truncate(action.get("how"), 800, "The implementation detail was not provided."),
-                "priority": _coerce_int(action.get("priority"), default=min(idx + 1, 10)),
-            }
-        )
+    for idx, item in enumerate(_student_improvement_candidates(data)):
+        normalized_improvement = _normalize_improvement_item(item, idx)
+        if normalized_improvement is not None:
+            improvement_plan.append(normalized_improvement)
 
     checklist = []
-    checklist_source = _first_present(data, "checklist", "action_items", "todo")
-    for idx, item in enumerate(_as_list(checklist_source)):
-        check = _as_dict(item)
-        checklist.append(
-            {
-                "item": _truncate(check.get("item"), 200, f"Checklist item {idx + 1}"),
-                "done": _coerce_bool(check.get("done"), default=False),
-            }
-        )
+    for idx, item in enumerate(_student_checklist_candidates(data)):
+        normalized_check = _normalize_checklist_item(item, idx)
+        if normalized_check is not None:
+            checklist.append(normalized_check)
 
     architecture_review = _as_dict(
         _first_present(data, "architecture_review", "architecture", "system_architecture")
@@ -1155,8 +1614,22 @@ def _normalize_student_llm_json(obj: Any, *, safe_mode: bool) -> dict[str, Any]:
     confidence = _as_dict(data.get("confidence"))
     model_agreement = _as_dict(data.get("model_agreement"))
     safety = _as_dict(data.get("safety"))
+    if not safety and any(key in data for key in ("safe_review", "safety_reason")):
+        safety = {
+            "needs_review": data.get("safe_review"),
+            "reason": data.get("safety_reason"),
+        }
+    flat_confidence_bucket = _coerce_int(
+        _first_present(data, "confidence_0_to_4"),
+        default=2,
+        minimum=0,
+        maximum=4,
+    )
     normalized_final_confidence = _coerce_float(model_agreement.get("final_confidence"), default=-1.0)
-    normalized_overall = _coerce_float(confidence.get("overall"), default=-1.0)
+    normalized_overall = _coerce_float(
+        _first_present(confidence, "overall", "score"),
+        default=-1.0,
+    )
     normalized_llm_confidence = _coerce_float(model_agreement.get("llm_confidence"), default=-1.0)
     normalized_ml_confidence = _coerce_float(model_agreement.get("ml_confidence"), default=-1.0)
 
@@ -1164,18 +1637,18 @@ def _normalize_student_llm_json(obj: Any, *, safe_mode: bool) -> dict[str, Any]:
         normalized_overall = (
             normalized_final_confidence
             if normalized_final_confidence >= 0.0
-            else (0.35 if safe_mode else 0.75)
+            else (flat_confidence_bucket / 4.0 if "confidence_0_to_4" in data else (0.35 if safe_mode else 0.75))
         )
     if normalized_llm_confidence < 0.0:
         normalized_llm_confidence = normalized_overall
     if normalized_final_confidence < 0.0:
         normalized_final_confidence = normalized_llm_confidence
     if normalized_ml_confidence < 0.0:
-        normalized_ml_confidence = 0.0
+        normalized_ml_confidence = flat_confidence_bucket / 4.0 if "confidence_0_to_4" in data else 0.0
 
     return {
         "summary": _truncate(
-            _first_present(data, "summary", "overview", "feedback_summary"),
+            _first_present(data, "summary", "overview", "feedback_summary", "main_excerpt"),
             1200,
             "Automated review generated with limited confidence.",
         ),
@@ -1218,8 +1691,11 @@ def _normalize_student_llm_json(obj: Any, *, safe_mode: bool) -> dict[str, Any]:
             "final_confidence": normalized_final_confidence,
         },
         "safety": {
-            "needs_review": _coerce_bool(safety.get("needs_review"), default=bool(safe_mode)),
-            "reason": _truncate(safety.get("reason"), 2000, ""),
+            "needs_review": _coerce_bool(
+                _first_present(safety, "needs_review", "safe_review"),
+                default=bool(safe_mode),
+            ),
+            "reason": _truncate(_first_present(safety, "reason", "safety_reason"), 2000, ""),
         },
     }
 
@@ -1230,26 +1706,15 @@ def _normalize_professor_output(obj: Any) -> dict[str, Any]:
 
     rubric_breakdown = []
     for idx, item in enumerate(_as_list(data.get("rubric_breakdown"))):
-        row = _as_dict(item)
-        rubric_breakdown.append(
-            {
-                "criterion": _truncate(row.get("criterion"), 200, f"Criterion {idx + 1}"),
-                "band": _truncate(row.get("band"), 80, "Needs review"),
-                "justification": _truncate(
-                    row.get("justification"), 1200, "A detailed justification was not provided."
-                ),
-            }
-        )
+        normalized_row = _normalize_rubric_row(item, idx)
+        if normalized_row is not None:
+            rubric_breakdown.append(normalized_row)
 
     moderation_notes = []
     for idx, item in enumerate(_as_list(data.get("moderation_notes"))):
-        note = _as_dict(item)
-        moderation_notes.append(
-            {
-                "risk": _truncate(note.get("risk"), 120, f"Risk {idx + 1}"),
-                "note": _truncate(note.get("note"), 800, "A moderation note was not provided."),
-            }
-        )
+        normalized_note = _normalize_moderation_note(item, idx)
+        if normalized_note is not None:
+            moderation_notes.append(normalized_note)
 
     if not rubric_breakdown:
         rubric_breakdown = [
@@ -1265,16 +1730,26 @@ def _normalize_professor_output(obj: Any) -> dict[str, Any]:
         ]
 
     safety = _as_dict(data.get("safety"))
+    if not safety and any(key in data for key in ("safe_review", "safety_reason")):
+        safety = {
+            "needs_review": data.get("safe_review"),
+            "reason": data.get("safety_reason"),
+        }
 
     return {
         "rubric_breakdown": rubric_breakdown,
         "feedback_explanation": _truncate(
-            data.get("feedback_explanation"), 1600, "Detailed feedback explanation unavailable."
+            _first_present(data, "feedback_explanation", "main_excerpt", "summary"),
+            1600,
+            "Detailed feedback explanation unavailable.",
         ),
         "moderation_notes": moderation_notes,
         "safety": {
-            "needs_review": _coerce_bool(safety.get("needs_review"), default=False),
-            "reason": _truncate(safety.get("reason"), 2000, ""),
+            "needs_review": _coerce_bool(
+                _first_present(safety, "needs_review", "safe_review"),
+                default=False,
+            ),
+            "reason": _truncate(_first_present(safety, "reason", "safety_reason"), 2000, ""),
         },
     }
 
@@ -1416,32 +1891,54 @@ def _professor_safe_fallback(model_used: str, needs_review: bool) -> dict[str, A
     }
 
 
-async def _call_repair_model(repair_prompt: str) -> dict[str, Any]:
+async def _call_repair_model(repair_prompt: str, *, fallback_raw: str = "") -> dict[str, Any]:
     """Call the repair/fallback model explicitly for JSON fix-up retries.
 
-    When the primary model (gemma3) returns unparseable output, we must NOT
+    When the primary model (gemma3:4b) returns unparseable output, we must NOT
     retry via generate_with_fallback because that would try gemma first again.
-    Instead we call the fallback model (mistral) directly using
-    generate_with_specific_model.  If that path is unavailable (Anthropic
+    Instead we call the fallback model (phi3:mini) directly using
+    generate_with_specific_model. If that path is unavailable (Anthropic
     provider has no such export), we fall back to generate_with_fallback as a
     safe default.
     """
+    repair_payload = _json_prompt_payload(
+        repair_prompt,
+        num_predict=settings.repair_max_output_tokens,
+        options={
+            "num_ctx": min(int(settings.ollama_fallback_num_ctx or 3072), 3072),
+            "num_batch": min(int(settings.ollama_fallback_num_batch or 16), 8),
+        },
+    )
     if _generate_with_specific_model is not None and _REPAIR_MODEL:
         try:
-            return await _generate_with_specific_model(_REPAIR_MODEL, repair_prompt)
+            return await _generate_with_specific_model(_REPAIR_MODEL, repair_payload)
         except Exception as exc:
-            logger.warning("repair model %s failed: %s — retrying via generate_with_fallback", _REPAIR_MODEL, exc)
-    return await generate_with_fallback(repair_prompt)
+            logger.warning("repair model %s failed: %s", _REPAIR_MODEL, exc)
+            return {
+                "model_used": _REPAIR_MODEL,
+                "response": fallback_raw,
+                "done": False,
+                "done_reason": "repair_failed",
+                "raw": {},
+            }
+    return await generate_with_fallback(repair_payload)
 
 
 async def _call_content_retry_model(prompt_text: str) -> dict[str, Any]:
     """Retry the full original prompt on the fallback model after low-content output."""
+    fallback_num_predict = min(
+        int(settings.student_report_max_output_tokens or 900),
+        int(settings.ollama_fallback_num_predict or 512),
+    )
     return await _call_generate_model(
-        {
-            "prompt": prompt_text,
-            "stream": False,
-            "format": "json",
-        },
+        _json_prompt_payload(
+            prompt_text,
+            num_predict=fallback_num_predict,
+            options={
+                "num_ctx": int(settings.ollama_fallback_num_ctx or 3072),
+                "num_batch": int(settings.ollama_fallback_num_batch or 16),
+            },
+        ),
         requested_model=_REPAIR_MODEL or None,
     )
 
@@ -1475,12 +1972,77 @@ def _parse_llm_json(raw: str) -> Any:
     except json.JSONDecodeError:
         pass
     repaired = _cheap_repair(extracted)
+    try:
+        return json.loads(repaired)
+    except json.JSONDecodeError as exc:
+        if "Expecting ',' delimiter" not in str(exc):
+            raise
+    repaired = _repair_missing_commas(repaired)
     return json.loads(repaired)
 
 
+def _canonical_json_text(raw: str) -> str:
+    parsed = _parse_llm_json(raw)
+    if not isinstance(parsed, dict):
+        raise json.JSONDecodeError("Expected a JSON object", str(raw or ""), 0)
+    return json.dumps(parsed, ensure_ascii=False)
+
+
+async def _repair_prompt_response_if_needed(
+    *,
+    role: str,
+    response_text: str,
+    model_used: str,
+) -> tuple[str, str, bool]:
+    try:
+        return _canonical_json_text(response_text), model_used, False
+    except json.JSONDecodeError as exc:
+        logger.warning(
+            "llm generate response invalid_json role=%s model=%s error=%s raw=%r",
+            role,
+            model_used,
+            exc,
+            _clip(response_text, 800),
+        )
+
+    try:
+        repair = await _call_repair_model(
+            fix_json_prompt(response_text, role),
+            fallback_raw=response_text,
+        )
+    except Exception as exc:
+        logger.warning(
+            "llm generate repair failed role=%s model=%s error=%s",
+            role,
+            model_used,
+            exc,
+        )
+        return response_text, model_used, False
+    repaired_model = str(repair.get("model_used") or model_used)
+    repaired_text = str(repair.get("response") or "")
+    try:
+        return _canonical_json_text(repaired_text), repaired_model, True
+    except json.JSONDecodeError as exc:
+        logger.warning(
+            "llm generate repair invalid_json role=%s model=%s error=%s raw=%r",
+            role,
+            repaired_model,
+            exc,
+            _clip(repaired_text, 800),
+        )
+        return response_text, model_used, False
+
+
 @app.get("/health")
-def health():
-    return {"ok": True}
+async def health():
+    return await _provider_health_payload()
+
+
+@app.get("/ready")
+async def ready():
+    body = await _provider_health_payload()
+    status_code = 200 if body["ready"] else 503
+    return JSONResponse(content=body, status_code=status_code)
 
 
 @app.post("/llm/generate", response_model=PromptGenerateOut)
@@ -1515,6 +2077,12 @@ async def generate_prompt(
     options = dict(payload.options or {})
     if payload.temperature is not None:
         options["temperature"] = float(payload.temperature)
+    if not isinstance(options.get("num_predict"), int):
+        options["num_predict"] = _scaled_num_predict(
+            enforced_prompt,
+            default_tokens=int(settings.ollama_num_predict or 1200),
+            maximum_tokens=int(settings.ollama_max_num_predict or settings.ollama_num_predict or 1400),
+        )
     if options:
         request_payload["options"] = options
 
@@ -1531,13 +2099,25 @@ async def generate_prompt(
             detail=f"local generation failed requested_model={requested}: {type(exc).__name__}: {exc}",
         ) from exc
     model_used = str(gen.get("model_used") or payload.requested_model or "")
+    fallback_used = bool(gen.get("fallback_used", False))
+    fallback_stage = str(gen.get("fallback_stage") or "")
     response_text = str(gen.get("response") or "")
+    response_text, model_used, repaired = await _repair_prompt_response_if_needed(
+        role=payload.role,
+        response_text=response_text,
+        model_used=model_used,
+    )
+    fallback_used = fallback_used or (model_used == _active_fallback_model() and model_used != _active_primary_model())
 
     return JSONResponse(
         content={"response": response_text, "model_used": model_used},
         headers=_llm_response_headers(
             model_used,
-            used_fallback=(model_used == _active_fallback_model() and model_used != _active_primary_model()),
+            used_fallback=fallback_used,
+            extra={
+                **({"x-llm-json-repaired": "true"} if repaired else {}),
+                **({"x-llm-fallback-stage": fallback_stage} if fallback_stage else {}),
+            } or None,
         ),
     )
 
@@ -1609,10 +2189,37 @@ async def student_report(
         len(payload.grounding_retrieved_chunks or []),
         len(payload.grounding_citations or []),
     )
+    try:
+        gen = await generate_with_fallback(
+            _json_prompt_payload(
+                prompt_text,
+                num_predict=_scaled_num_predict(
+                    payload.ingestion.text_content or "",
+                    default_tokens=int(settings.student_report_max_output_tokens or 1200),
+                    maximum_tokens=int(settings.ollama_max_num_predict or settings.student_report_max_output_tokens or 1400),
+                ),
+            )
+        )
+        model_used = str(gen.get("model_used") or _active_fallback_model() or _active_primary_model() or "unknown")
+        raw = str(gen.get("response") or "")
+    except Exception as exc:
+        model_used = _active_fallback_model() or _active_primary_model() or "unknown"
+        logger.exception(
+            "student_report failure=transport stage=initial_generation model=%s safe_mode=%s injected=%s retrieval_weak=%s error=%s",
+            model_used,
+            safe_mode,
+            injected,
+            retrieval_weak,
+            exc,
+        )
+        fallback_body = _student_safe_fallback(model_used, safe_mode, needs_review)
+        fallback_body["rag_meta"] = _student_rag_meta(payload)
+        return JSONResponse(
+            content=fallback_body,
+            status_code=200,
+            headers=_llm_response_headers(model_used, used_fallback=True),
+        )
 
-    gen = await generate_with_fallback(prompt_text)
-    model_used = gen["model_used"]
-    raw = str(gen.get("response") or "")
     for attempt in range(settings.max_retries + 1):
         logger.info(
             "student_report raw_response attempt=%s/%s model=%s chars=%s preview=%r",
@@ -1795,7 +2402,8 @@ async def student_report(
                     _student_fix_target(payload),
                     forced_confidence_mode="restricted" if safe_mode else "normal",
                     forced_needs_review=needs_review,
-                )
+                ),
+                fallback_raw=raw,
             )
             model_used = gen["model_used"]
             raw = gen["response"]
@@ -1855,11 +2463,11 @@ async def student_report(
                     _student_fix_target(payload),
                     forced_confidence_mode="restricted" if safe_mode else "normal",
                     forced_needs_review=needs_review,
-                )
+                ),
+                fallback_raw=raw,
             )
             model_used = gen["model_used"]
             raw = gen["response"]
-
 
 @app.post("/llm/professor/report", response_model=ProfessorReportOut)
 async def professor_report(
@@ -1916,9 +2524,36 @@ async def professor_report(
         len(payload.grounding_retrieved_chunks or []),
         len(payload.grounding_citations or []),
     )
-    gen = await generate_with_fallback(prof_prompt_text)
-    model_used = gen["model_used"]
-    raw = gen["response"]
+    try:
+        gen = await generate_with_fallback(
+            _json_prompt_payload(
+                prof_prompt_text,
+                num_predict=_scaled_num_predict(
+                    payload.ingestion.text_content or "",
+                    default_tokens=int(settings.professor_report_max_output_tokens or 1200),
+                    maximum_tokens=int(settings.ollama_max_num_predict or settings.professor_report_max_output_tokens or 1400),
+                ),
+            )
+        )
+        model_used = str(gen.get("model_used") or _active_fallback_model() or _active_primary_model() or "unknown")
+        raw = str(gen.get("response") or "")
+    except Exception as exc:
+        model_used = _active_fallback_model() or _active_primary_model() or "unknown"
+        logger.exception(
+            "professor_report failure=transport stage=initial_generation model=%s needs_review=%s injected=%s retrieval_weak=%s error=%s",
+            model_used,
+            needs_review,
+            injected,
+            retrieval_weak,
+            exc,
+        )
+        fallback_body = _professor_safe_fallback(model_used, needs_review)
+        fallback_body["rag_meta"] = _professor_rag_meta(payload)
+        return JSONResponse(
+            content=fallback_body,
+            status_code=200,
+            headers=_llm_response_headers(model_used, used_fallback=True),
+        )
 
     for attempt in range(settings.max_retries + 1):
         try:
@@ -1992,7 +2627,8 @@ async def professor_report(
                     raw,
                     "professor",
                     forced_needs_review=needs_review,
-                )
+                ),
+                fallback_raw=raw,
             )
             model_used = gen["model_used"]
             raw = gen["response"]
@@ -2038,7 +2674,8 @@ async def professor_report(
                     raw,
                     "professor",
                     forced_needs_review=needs_review,
-                )
+                ),
+                fallback_raw=raw,
             )
             model_used = gen["model_used"]
             raw = gen["response"]

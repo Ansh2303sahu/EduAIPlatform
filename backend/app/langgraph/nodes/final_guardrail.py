@@ -27,7 +27,7 @@ NODE_SPEC = Phase12NodeDescriptor(
 def _expected_report_keys(state: Phase12GraphState) -> list[str]:
     if state.role == "student":
         return ["summary", "issues", "strengths", "safety"]
-    return ["summary", "feedback_explanation", "safety"]
+    return ["rubric_breakdown", "feedback_explanation", "safety"]
 
 
 def _coherent_terminal_status(state: Phase12GraphState) -> GraphExecutionStatus:

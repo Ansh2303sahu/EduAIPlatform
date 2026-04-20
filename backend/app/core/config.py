@@ -83,8 +83,8 @@ class Settings(BaseSettings):
     llm_service_url: str = Field(default="http://llm-service:8030", alias="LLM_SERVICE_URL")
     llm_service_secret: str = Field(default="", alias="LLM_SERVICE_SECRET")
     # Display labels stored in model_versions — set to match LLM_PROVIDER choice
-    llm_primary_label: str = Field(default="mistral:latest", alias="LLM_PRIMARY_LABEL")
-    llm_fallback_label: str = Field(default="gemma3:latest", alias="LLM_FALLBACK_LABEL")
+    llm_primary_label: str = Field(default="gemma3:4b", alias="LLM_PRIMARY_LABEL")
+    llm_fallback_label: str = Field(default="phi3:mini", alias="LLM_FALLBACK_LABEL")
 
     # -------------------------
     # Phase 9 — RAG core

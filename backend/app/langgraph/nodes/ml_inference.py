@@ -5,6 +5,8 @@ Wraps the ML request helpers already exposed through
 ML call path.
 """
 
+import time
+
 from ..adapters import report_support
 from ..schemas import Phase12NodeDescriptor
 from ..state import Phase12GraphState
@@ -23,10 +25,13 @@ NODE_SPEC = Phase12NodeDescriptor(
 async def run(state: Phase12GraphState) -> Phase12GraphState:
     """Populate raw ML output using the existing Phase 10 support layer."""
 
-    if state.role == "student":
-        state.pipeline_context.ml_raw = await report_support.call_student_ml_for_state(state)
-    else:
-        state.pipeline_context.ml_raw = await report_support.call_professor_ml_for_state(state)
+    t0 = time.perf_counter()
+    if not state.pipeline_context.ml_raw:
+        if state.role == "student":
+            state.pipeline_context.ml_raw = await report_support.call_student_ml_for_state(state)
+        else:
+            state.pipeline_context.ml_raw = await report_support.call_professor_ml_for_state(state)
+    state.pipeline_context.timings_ms["ai_service"] = int((time.perf_counter() - t0) * 1000)
     record_event(
         state,
         NODE_NAME,

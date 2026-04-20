@@ -59,6 +59,20 @@ _STOPWORDS = {
     "system",
     "platform",
     "project",
+    "week",
+    "weeks",
+    "exercise",
+    "exercises",
+    "basic",
+    "introduced",
+    "introduces",
+    "demonstrates",
+    "demonstrate",
+    "created",
+    "various",
+    "task",
+    "tasks",
+    "extended",
 }
 
 _LOW_VALUE_FOCUS_TERMS = {
@@ -133,6 +147,21 @@ _LOW_VALUE_FOCUS_TERMS = {
     "stock portfolio management system",
     "student software engineering project",
     "notes",
+    "this",
+    "week",
+    "weeks",
+    "exercise",
+    "exercises",
+    "basic",
+    "introduced",
+    "introduces",
+    "demonstrates",
+    "demonstrate",
+    "created",
+    "various",
+    "task",
+    "tasks",
+    "extended",
 }
 
 
@@ -354,6 +383,12 @@ def _mode_hint(req: RetrievalQuery) -> str:
         return "software project"
     if mode == "essay":
         return "academic writing"
+    if mode == "report":
+        return "academic report writing"
+    if mode == "chapter":
+        return "academic chapter writing"
+    if mode == "mixed":
+        return "submission critique"
     if mode == "feedback":
         return "feedback template moderation"
     if mode == "policy":

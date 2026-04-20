@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from importlib import import_module
 from typing import Any, Dict, Tuple
 
 # Simple in-process cache so we don't re-load the model every job/chunk
@@ -22,7 +23,16 @@ def _pick_device() -> Tuple[str, str]:
 
 
 def _get_model(model_name: str, device: str, compute_type: str):
-    from faster_whisper import WhisperModel
+    try:
+        whisper_module = import_module("faster_whisper")
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "Local transcription requires faster-whisper. Install backend requirements to enable it."
+        ) from exc
+
+    WhisperModel = getattr(whisper_module, "WhisperModel", None)
+    if WhisperModel is None:
+        raise RuntimeError("faster_whisper.WhisperModel is unavailable")
 
     key = (model_name, device, compute_type)
     m = _MODEL_CACHE.get(key)

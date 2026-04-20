@@ -446,4 +446,9 @@ def summarize_rag_trace(trace: Mapping[str, Any] | None) -> dict[str, Any]:
         "reranking_changed_order": bool(data.get("reranking_changed_order", False)),
         "packaging_trimmed": bool(data.get("packaging_trimmed", False)),
         "packaging_context_chars": _clamp_int(data.get("packaging_context_chars"), default=0, minimum=0),
+        "grounding_rejected": bool(data.get("grounding_rejected", False)),
+        "grounding_rejection_reasons": list(data.get("grounding_rejection_reasons") or [])[:4],
+        "submission_alignment_count": _clamp_int(data.get("submission_alignment_count"), default=0, minimum=0),
+        "approved_chunk_count": _clamp_int(data.get("approved_chunk_count"), default=0, minimum=0),
+        "rejected_chunk_count": _clamp_int(data.get("rejected_chunk_count"), default=0, minimum=0),
     }

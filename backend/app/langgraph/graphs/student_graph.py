@@ -132,6 +132,11 @@ async def _ingestion_node(state: Phase12GraphState) -> Phase12GraphState:
     return await _safe_exec(_ingestion_mod.run, state, "ingestion")
 
 
+async def _input_validation_node(state: Phase12GraphState) -> Phase12GraphState:
+    state.graph_name = phase12_settings.student_graph_name
+    return await input_validation_node(state)
+
+
 async def _ml_inference_node(state: Phase12GraphState) -> Phase12GraphState:
     return await _safe_exec(_ml_inference_mod.run, state, "ml_inference")
 
@@ -274,7 +279,7 @@ def _build_student_graph() -> StateGraph:
     g = StateGraph(Phase12GraphState)
 
     # --- Control nodes (no external I/O) ---
-    g.add_node("input_validation", input_validation_node)
+    g.add_node("input_validation", _input_validation_node)
     g.add_node("policy_check", policy_check_node)
     g.add_node("evidence_sufficiency", evidence_sufficiency_node)
     g.add_node("ml_decision", ml_decision_node)

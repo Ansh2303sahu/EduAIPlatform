@@ -21,6 +21,7 @@ Standalone result models
 
 from __future__ import annotations
 
+from enum import Enum
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
@@ -105,6 +106,8 @@ class MLContextResult(BaseModel):
     Carries both the raw ML dict and the human-readable text injected into
     the prompt, so both can be stored for audit purposes.
     """
+
+    model_config = {"protected_namespaces": ()}
 
     raw: Dict[str, Any] = Field(default_factory=dict)
     normalized: Dict[str, Any] = Field(default_factory=dict)
@@ -210,6 +213,8 @@ class ExecutionMetadata(BaseModel):
     every report is traceable back to its chain version and model.
     """
 
+    model_config = {"protected_namespaces": ()}
+
     request_id: str = ""
     pipeline: str = "phase10_langchain"
 
@@ -242,6 +247,12 @@ class ExecutionMetadata(BaseModel):
     retrieval_debug: Dict[str, Any] = Field(default_factory=dict)
     prompt_debug: Dict[str, Any] = Field(default_factory=dict)
 
+    @staticmethod
+    def _enum_or_text(value: Any) -> str:
+        if isinstance(value, Enum):
+            return str(value.value)
+        return str(value or "")
+
     def to_model_versions_dict(self) -> Dict[str, Any]:
         """
         Serialise to the ``model_versions`` dict shape expected by
@@ -251,9 +262,13 @@ class ExecutionMetadata(BaseModel):
         return {
             "request_id": self.request_id,
             "pipeline": self.pipeline,
+            "provider": self.provider,
             "llm_primary": self.primary_model,
             "llm_fallback": self.fallback_model,
             "llm_model_used": self.model_used or "unknown",
+            "fallback_used": self.fallback_used,
+            "execution_mode": self._enum_or_text(self.execution_mode),
+            "decision_source": self._enum_or_text(self.decision_source),
             "timings_ms": self.timings_ms,
             "agreement": {
                 "final_confidence": self.agreement_score,
@@ -275,6 +290,8 @@ class ExecutionMetadata(BaseModel):
 class GenerationResult(BaseModel):
     """Raw output from a single LangChain chain invocation."""
 
+    model_config = {"protected_namespaces": ()}
+
     raw_text: str
     model_used: str
     provider: str
@@ -294,7 +311,7 @@ class PipelineContext(BaseModel):
     so that a partially-initialised context never raises AttributeError.
     """
 
-    model_config = {"arbitrary_types_allowed": True}
+    model_config = {"arbitrary_types_allowed": True, "protected_namespaces": ()}
 
     # ── Identity ──────────────────────────────────────────────────────────────
     request_id: str
@@ -310,6 +327,7 @@ class PipelineContext(BaseModel):
 
     # ── Input data ────────────────────────────────────────────────────────────
     ingestion: IngestionBundle = Field(default_factory=IngestionBundle)
+    file_metadata: Dict[str, Any] = Field(default_factory=dict)
 
     # ── Safety ────────────────────────────────────────────────────────────────
     injection_detected: bool = False

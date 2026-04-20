@@ -13,6 +13,7 @@ from app.mcp.executor import execute_tool
 from app.mcp.orchestrator import orchestrate_workflow
 from app.mcp.orchestration_schemas import WorkflowRequest
 from app.mcp.schemas import MCPExecuteRequest, ToolExecutionContext
+from app.services.uuid_normalization import uuid_or_none
 
 from ..state import Phase12GraphState
 
@@ -25,11 +26,17 @@ def build_tool_context(
 ) -> ToolExecutionContext:
     """Build the standard MCP tool execution context from graph state."""
 
+    context_file_id = uuid_or_none(file_id) or uuid_or_none(state.pipeline_context.file_id)
+    context_submission_id = (
+        uuid_or_none(submission_id)
+        or uuid_or_none(state.pipeline_context.submission_id)
+    )
+
     return ToolExecutionContext(
         user_id=state.user_id,
         role=state.role,
-        file_id=file_id or state.pipeline_context.file_id,
-        submission_id=submission_id or state.pipeline_context.submission_id or None,
+        file_id=context_file_id,
+        submission_id=context_submission_id,
         correlation_id=state.correlation_id,
         request_id=state.pipeline_context.request_id,
     )
@@ -65,7 +72,7 @@ async def orchestrate_for_state(
         user_id=state.user_id,
         role=state.role,
         correlation_id=state.correlation_id,
-        file_id=state.pipeline_context.file_id,
-        submission_id=state.pipeline_context.submission_id or None,
+        file_id=uuid_or_none(state.pipeline_context.file_id),
+        submission_id=uuid_or_none(state.pipeline_context.submission_id),
     )
     return result.model_dump(mode="json")

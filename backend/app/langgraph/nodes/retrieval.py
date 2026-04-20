@@ -5,6 +5,10 @@ aligned with the same submission-aware retrieval and trace contracts instead of
 adding a separate retrieval implementation.
 """
 
+import time
+
+from app.langchain.services.retrieval_packager import summarize_rag_trace
+
 from ..adapters import rag
 from ..schemas import Phase12NodeDescriptor
 from ..state import Phase12GraphState
@@ -26,9 +30,21 @@ NODE_SPEC = Phase12NodeDescriptor(
 async def run(state: Phase12GraphState) -> Phase12GraphState:
     """Populate packaged RAG context through the current Phase 10 retrieval stack."""
 
+    t0 = time.perf_counter()
+    state.retrieval_attempts += 1
     payload, rag_context = rag.pack_rag_for_state(state)
     state.pipeline_context.rag = rag_context
-    state.pipeline_context.execution_meta.retrieval_debug = payload
+    trace_summary = summarize_rag_trace(rag_context.trace)
+    state.pipeline_context.execution_meta.retrieval_debug = {
+        **trace_summary,
+        "query": str(payload.get("query") or trace_summary.get("query") or ""),
+        "chunk_count": int(rag_context.chunk_count or len(rag_context.retrieved_chunks)),
+        "weak_retrieval": bool(rag_context.weak_retrieval),
+        "safe_review": bool(rag_context.safe_review),
+        "confidence_score": float(rag_context.confidence_score or 0.0),
+        "confidence_label": str(rag_context.confidence_label or "low"),
+    }
+    state.pipeline_context.timings_ms["rag"] = int((time.perf_counter() - t0) * 1000)
     record_event(
         state,
         NODE_NAME,

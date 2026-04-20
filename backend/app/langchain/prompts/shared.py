@@ -71,6 +71,10 @@ def _string_list(values: Any, *, limit: int, item_limit: int) -> list[str]:
     return items
 
 
+def _joined_text(values: Sequence[str]) -> str:
+    return " ".join(part for part in values if part).strip()
+
+
 def _pretty_json(value: Any) -> str:
     """Serialise a value to indented JSON for prompt embedding."""
     try:
@@ -123,6 +127,113 @@ def build_weak_evidence_section(*, extra_lines: Optional[Sequence[str]] = None) 
     if extra_lines:
         lines.extend(str(line).strip() for line in extra_lines if str(line).strip())
     return render_bullets("WHEN EVIDENCE IS WEAK", lines)
+
+
+def _paragraphs(text: str) -> list[str]:
+    raw_parts = [
+        _clean_text(part, 900)
+        for part in str(text or "").replace("\r", "\n").split("\n")
+    ]
+    parts = [part for part in raw_parts if part]
+    if parts:
+        return parts
+
+    sentences = [
+        _clean_text(part, 900)
+        for part in str(text or "").split(". ")
+    ]
+    return [part for part in sentences if part]
+
+
+def _best_excerpt(paragraphs: Sequence[str], *, index: int) -> str:
+    if not paragraphs:
+        return ""
+    bounded = max(0, min(len(paragraphs) - 1, index))
+    return _clean_text(paragraphs[bounded], min(420, phase10_settings.prompt_submission_text_chars // 4))
+
+
+def _evidence_excerpt(paragraphs: Sequence[str]) -> str:
+    evidence_terms = ("because", "for example", "evidence", "data", "reference", "test", "result", "finding")
+    ranked = sorted(
+        paragraphs,
+        key=lambda part: (sum(term in part.lower() for term in evidence_terms), len(part)),
+        reverse=True,
+    )
+    return _best_excerpt(ranked, index=0)
+
+
+def build_assignment_context_section(
+    *,
+    file_metadata: Mapping[str, Any] | None,
+    submission_kind: str,
+    ingestion: Any,
+) -> str:
+    metadata = dict(file_metadata or {})
+    title_hint = _clean_text(
+        metadata.get("assignment_title")
+        or metadata.get("title")
+        or metadata.get("file_name")
+        or _best_excerpt(_paragraphs(_field(ingestion, "text_content", "")), index=0),
+        180,
+    )
+    module_hint = _clean_text(metadata.get("module") or metadata.get("course"), 120)
+    level_hint = _clean_text(metadata.get("academic_level") or metadata.get("level"), 80)
+    word_target = _clean_text(metadata.get("word_count_target") or metadata.get("word_limit"), 60)
+    rubric_hint = _clean_text(metadata.get("rubric_summary") or metadata.get("rubric_text"), 320)
+
+    lines = [
+        f"Assignment title: {title_hint or 'Not available'}",
+        f"Assignment type: {submission_kind or 'unknown'}",
+    ]
+    if module_hint:
+        lines.append(f"Module or course: {module_hint}")
+    if level_hint:
+        lines.append(f"Academic level: {level_hint}")
+    if word_target:
+        lines.append(f"Word target: {word_target}")
+    if rubric_hint:
+        lines.append(f"Rubric summary: {rubric_hint}")
+    return render_bullets("ASSIGNMENT CONTEXT", lines)
+
+
+def build_submission_digest_section(ingestion: Any, *, submission_kind: str) -> str:
+    paragraphs = _paragraphs(_field(ingestion, "text_content", ""))
+    digest = _best_excerpt(paragraphs, index=0)
+    if len(paragraphs) >= 3:
+        digest = _joined_text([_best_excerpt(paragraphs, index=0), _best_excerpt(paragraphs, index=len(paragraphs) // 2)])
+
+    lines = [
+        f"Submission type profile: {submission_kind or 'unknown'}",
+        f"Submission digest: {digest or 'No compact digest could be derived from the extracted text.'}",
+        f"Extracted text length: {len(str(_field(ingestion, 'text_content', '') or ''))} characters",
+    ]
+    return render_bullets("SUBMISSION DIGEST", lines)
+
+
+def build_representative_excerpts_section(ingestion: Any) -> str:
+    paragraphs = _paragraphs(_field(ingestion, "text_content", ""))
+    if not paragraphs:
+        return render_section(
+            "REPRESENTATIVE EXCERPTS",
+            "No representative text excerpts were available from the extracted submission.",
+        )
+
+    intro = _best_excerpt(paragraphs, index=0)
+    middle = _best_excerpt(paragraphs, index=len(paragraphs) // 2)
+    conclusion = _best_excerpt(paragraphs, index=len(paragraphs) - 1)
+    evidence = _evidence_excerpt(paragraphs)
+
+    blocks = [
+        f"[INTRO OR OPENING]\n{intro}",
+    ]
+    if middle and middle != intro:
+        blocks.append(f"[MIDDLE OR CORE SECTION]\n{middle}")
+    if evidence and evidence not in {intro, middle}:
+        blocks.append(f"[EVIDENCE-RICH EXCERPT]\n{evidence}")
+    if conclusion and conclusion not in {intro, middle, evidence}:
+        blocks.append(f"[CONCLUSION OR FINAL SECTION]\n{conclusion}")
+
+    return render_section("REPRESENTATIVE EXCERPTS", "\n\n".join(blocks))
 
 
 def build_submission_summary_section(ingestion: Any, *, submission_kind: str) -> str:

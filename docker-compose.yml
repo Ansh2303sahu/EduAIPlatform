@@ -20,8 +20,31 @@ services:
 
       LLM_SERVICE_URL: http://llm-service:8030
       LLM_SERVICE_SECRET: dev_llm_secret
-      LLM_PRIMARY_LABEL: ${LLM_PRIMARY_LABEL:-mistral:latest}
-      LLM_FALLBACK_LABEL: ${LLM_FALLBACK_LABEL:-mistral:latest}
+      OLLAMA_PRIMARY_MODEL: ${OLLAMA_PRIMARY_MODEL:-gemma3:4b}
+      OLLAMA_FALLBACK_MODEL: ${OLLAMA_FALLBACK_MODEL:-phi3:mini}
+      OLLAMA_NUM_CTX: ${OLLAMA_NUM_CTX:-8192}
+      OLLAMA_MAX_NUM_CTX: ${OLLAMA_MAX_NUM_CTX:-8192}
+      OLLAMA_TOP_P: ${OLLAMA_TOP_P:-0.9}
+      OLLAMA_TOP_K: ${OLLAMA_TOP_K:-40}
+      OLLAMA_REPEAT_PENALTY: ${OLLAMA_REPEAT_PENALTY:-1.12}
+      PHASE10_TIMEOUT_SECONDS: ${PHASE10_TIMEOUT_SECONDS:-120}
+      PHASE10_STUDENT_TIMEOUT_SECONDS: ${PHASE10_STUDENT_TIMEOUT_SECONDS:-180}
+      PHASE10_PROFESSOR_TIMEOUT_SECONDS: ${PHASE10_PROFESSOR_TIMEOUT_SECONDS:-180}
+      PHASE10_STUDENT_TEMPERATURE: ${PHASE10_STUDENT_TEMPERATURE:-0.15}
+      PHASE10_PROFESSOR_TEMPERATURE: ${PHASE10_PROFESSOR_TEMPERATURE:-0.15}
+      PHASE10_STUDENT_DEFAULT_OUTPUT_TOKENS: ${PHASE10_STUDENT_DEFAULT_OUTPUT_TOKENS:-1200}
+      PHASE10_PROFESSOR_DEFAULT_OUTPUT_TOKENS: ${PHASE10_PROFESSOR_DEFAULT_OUTPUT_TOKENS:-1200}
+      PHASE10_STUDENT_MIN_OUTPUT_TOKENS: ${PHASE10_STUDENT_MIN_OUTPUT_TOKENS:-850}
+      PHASE10_PROFESSOR_MIN_OUTPUT_TOKENS: ${PHASE10_PROFESSOR_MIN_OUTPUT_TOKENS:-900}
+      PHASE10_STUDENT_MAX_OUTPUT_TOKENS: ${PHASE10_STUDENT_MAX_OUTPUT_TOKENS:-1400}
+      PHASE10_PROFESSOR_MAX_OUTPUT_TOKENS: ${PHASE10_PROFESSOR_MAX_OUTPUT_TOKENS:-1400}
+      PHASE10_OUTPUT_BUDGET_SHORT_CHARS: ${PHASE10_OUTPUT_BUDGET_SHORT_CHARS:-2500}
+      PHASE10_OUTPUT_BUDGET_MEDIUM_CHARS: ${PHASE10_OUTPUT_BUDGET_MEDIUM_CHARS:-7000}
+      LLM_PRIMARY_LABEL: ${LLM_PRIMARY_LABEL:-gemma3:4b}
+      LLM_FALLBACK_LABEL: ${LLM_FALLBACK_LABEL:-phi3:mini}
+      N8N_BASE_URL: ${N8N_BASE_URL:-http://host.docker.internal:5678}
+      N8N_WEBHOOK_HMAC_SECRET: ${N8N_WEBHOOK_HMAC_SECRET:-dev_n8n_webhook_secret}
+      BACKEND_INTERNAL_SECRET: ${BACKEND_INTERNAL_SECRET:-dev_backend_internal_secret}
     depends_on:
       - clamav
       - parser
@@ -33,8 +56,11 @@ services:
       - ./backend:/app
       - scan_files:/scan_files
       - ./backend/storage:/app/storage
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
     ports:
       - "127.0.0.1:8000:8000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
     healthcheck:
       test: >
@@ -69,8 +95,8 @@ services:
 
       LLM_SERVICE_URL: http://llm-service:8030
       LLM_SERVICE_SECRET: dev_llm_secret
-      LLM_PRIMARY_LABEL: ${LLM_PRIMARY_LABEL:-mistral:latest}
-      LLM_FALLBACK_LABEL: ${LLM_FALLBACK_LABEL:-mistral:latest}
+      LLM_PRIMARY_LABEL: ${LLM_PRIMARY_LABEL:-gemma3:4b}
+      LLM_FALLBACK_LABEL: ${LLM_FALLBACK_LABEL:-phi3:mini}
 
       SIGNED_URL_EXPIRES_SECONDS: "60"
       INGESTION_POLL_SECONDS: "2"
@@ -118,8 +144,8 @@ services:
 
       LLM_SERVICE_URL: http://llm-service:8030
       LLM_SERVICE_SECRET: dev_llm_secret
-      LLM_PRIMARY_LABEL: ${LLM_PRIMARY_LABEL:-mistral:latest}
-      LLM_FALLBACK_LABEL: ${LLM_FALLBACK_LABEL:-mistral:latest}
+      LLM_PRIMARY_LABEL: ${LLM_PRIMARY_LABEL:-gemma3:4b}
+      LLM_FALLBACK_LABEL: ${LLM_FALLBACK_LABEL:-phi3:mini}
 
       SIGNED_URL_EXPIRES_SECONDS: "60"
       INGESTION_POLL_SECONDS: "2"
@@ -174,8 +200,8 @@ services:
 
       LLM_SERVICE_URL: http://llm-service:8030
       LLM_SERVICE_SECRET: dev_llm_secret
-      LLM_PRIMARY_LABEL: ${LLM_PRIMARY_LABEL:-mistral:latest}
-      LLM_FALLBACK_LABEL: ${LLM_FALLBACK_LABEL:-mistral:latest}
+      LLM_PRIMARY_LABEL: ${LLM_PRIMARY_LABEL:-gemma3:4b}
+      LLM_FALLBACK_LABEL: ${LLM_FALLBACK_LABEL:-phi3:mini}
 
       SIGNED_URL_EXPIRES_SECONDS: "60"
       PROF_INGESTION_POLL_SECONDS: "2"
@@ -262,9 +288,9 @@ services:
     healthcheck:
       test: >
         python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8010/health', timeout=2).read()"
-      interval: 10s
+      interval: 30s
       timeout: 3s
-      retries: 15
+      retries: 5
       start_period: 30s
 
   clamav:
@@ -288,11 +314,24 @@ services:
       LLM_PROVIDER: "ollama"
 
       # --- Ollama (used when LLM_PROVIDER=ollama) ---
-      OLLAMA_BASE_URL: "http://host.docker.internal:11434"
-      OLLAMA_PRIMARY_MODEL: "mistral:latest"
-      OLLAMA_FALLBACK_MODEL: "mistral:latest"
-      # Stable structured-output settings: low temp, enough tokens, controlled sampling
-      OLLAMA_OPTIONS_JSON: '{"num_predict": 4096, "temperature": 0.1, "top_p": 0.9, "top_k": 40, "repeat_penalty": 1.1}'
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      OLLAMA_PRIMARY_MODEL: ${OLLAMA_PRIMARY_MODEL:-gemma3:4b}
+      OLLAMA_FALLBACK_MODEL: ${OLLAMA_FALLBACK_MODEL:-phi3:mini}
+      OLLAMA_NUM_CTX: ${OLLAMA_NUM_CTX:-8192}
+      OLLAMA_MAX_NUM_CTX: ${OLLAMA_MAX_NUM_CTX:-8192}
+      OLLAMA_NUM_PREDICT: ${OLLAMA_NUM_PREDICT:-1200}
+      OLLAMA_MAX_NUM_PREDICT: ${OLLAMA_MAX_NUM_PREDICT:-1400}
+      OLLAMA_NUM_BATCH: ${OLLAMA_NUM_BATCH:-16}
+      OLLAMA_TEMPERATURE: ${OLLAMA_TEMPERATURE:-0.15}
+      OLLAMA_TOP_P: ${OLLAMA_TOP_P:-0.9}
+      OLLAMA_TOP_K: ${OLLAMA_TOP_K:-40}
+      OLLAMA_REPEAT_PENALTY: ${OLLAMA_REPEAT_PENALTY:-1.12}
+      OLLAMA_FALLBACK_NUM_CTX: ${OLLAMA_FALLBACK_NUM_CTX:-3072}
+      OLLAMA_FALLBACK_NUM_PREDICT: ${OLLAMA_FALLBACK_NUM_PREDICT:-512}
+      OLLAMA_FALLBACK_NUM_BATCH: ${OLLAMA_FALLBACK_NUM_BATCH:-16}
+      LLM_STUDENT_REPORT_MAX_OUTPUT_TOKENS: ${LLM_STUDENT_REPORT_MAX_OUTPUT_TOKENS:-1200}
+      LLM_PROFESSOR_REPORT_MAX_OUTPUT_TOKENS: ${LLM_PROFESSOR_REPORT_MAX_OUTPUT_TOKENS:-1200}
+      LLM_REPAIR_MAX_OUTPUT_TOKENS: ${LLM_REPAIR_MAX_OUTPUT_TOKENS:-700}
 
       # --- Anthropic / Claude (used when LLM_PROVIDER=anthropic) ---
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
@@ -301,8 +340,8 @@ services:
       ANTHROPIC_MAX_TOKENS: ${ANTHROPIC_MAX_TOKENS:-4096}
 
       # --- Shared ---
-      LLM_TIMEOUT_SECONDS: "360"
-      LLM_MAX_INPUT_CHARS: "50000"
+      LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-120}
+      LLM_MAX_INPUT_CHARS: ${LLM_MAX_INPUT_CHARS:-12000}
       LLM_MAX_RETRIES: "1"
       LLM_SERVICE_SECRET: dev_llm_secret
     networks:
@@ -316,11 +355,12 @@ services:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
     healthcheck:
+      # Local dev liveness probe. Keep `/ready` for explicit provider checks.
       test: >
         python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8030/health', timeout=2).read()"
-      interval: 10s
+      interval: 30s
       timeout: 3s
-      retries: 15
+      retries: 5
       start_period: 20s
 
 networks:

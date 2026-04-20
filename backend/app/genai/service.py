@@ -10,12 +10,24 @@ from typing import Any, Literal
 from fastapi import HTTPException
 
 from app.core.deps import CurrentUser
+from app.events.config import get_event_settings
 from app.genai.config import genai_settings
 from app.genai.consistency import detect_report_contradictions
-from app.genai.explainability import build_explanation_tab, build_sources_tab
+from app.genai.explainability import build_explanation_tab, build_sources_tab, confidence_band
 from app.genai.fairness import build_fairness_tab
 from app.genai.pdf_service import build_pdf_base64
 from app.genai.schemas import (
+    AICheckGenAI,
+    AICheckLLM,
+    AICheckLangChain,
+    AICheckLangGraph,
+    AICheckMCP,
+    AICheckML,
+    AICheckN8N,
+    AICheckN8NIntegrations,
+    AICheckRAG,
+    AICheckResponse,
+    AICheckSummary,
     AIReportGenerateIn,
     AIReportResponse,
     AuditResponse,
@@ -42,6 +54,9 @@ from app.langgraph.graphs.student_generative_graph import get_student_generative
 from app.langgraph.schemas import Phase12ExecutionRequest
 from app.langgraph.state import Phase12GraphState
 from app.langgraph.tracing.model_versions import build_phase12_model_versions
+from app.mcp.config import mcp_settings
+from app.rag.store import build_storage_fields_from_rag_meta
+from app.services.report_richness import extract_best_summary
 from app.services import report_generation_support as support
 
 logger = logging.getLogger("phase15_16.genai")
@@ -68,6 +83,104 @@ def _stored_summary(row: dict[str, Any] | None) -> StoredSummary | None:
         role=str(row.get("role") or ""),
         created_at=row.get("created_at"),
         needs_review=bool(row.get("needs_review", False)),
+    )
+
+
+def _as_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _as_list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
+def _as_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _as_float(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return max(0.0, min(1.0, number))
+
+
+def _safe_confidence_band(score: float | None) -> str | None:
+    if score is None:
+        return None
+    return confidence_band(score)
+
+
+def _route_label(primary_model: str, fallback_model: str, model_used: str) -> str:
+    primary = _as_text(primary_model)
+    fallback = _as_text(fallback_model)
+    used = _as_text(model_used)
+    if primary and fallback and fallback != primary:
+        return f"{primary} -> {fallback}"
+    return used or primary or fallback
+
+
+def _model_versions_section(row: dict[str, Any] | None, key: str) -> dict[str, Any]:
+    return _as_dict(_as_dict(_as_dict(row).get("model_versions")).get(key))
+
+
+def _rag_has_meaningful_data(rag_meta: dict[str, Any] | None) -> bool:
+    rag = _as_dict(rag_meta)
+    if not rag:
+        return False
+
+    citations = _as_list(rag.get("citations"))
+    retrieved_chunks = _as_list(rag.get("retrieved_chunks"))
+    trace = _as_dict(rag.get("trace"))
+    score = _as_float(rag.get("confidence_score"))
+
+    return bool(
+        rag.get("enabled")
+        or citations
+        or retrieved_chunks
+        or trace
+        or bool(rag.get("safe_review"))
+        or (score is not None and score > 0.0)
+    )
+
+
+def _rag_check_from_storage_row(
+    row: dict[str, Any] | None,
+    *,
+    empty_summary: str,
+) -> AICheckRAG | None:
+    if not row:
+        return None
+
+    citations = _as_list(row.get("citations"))
+    retrieved_chunks = _as_list(row.get("retrieved_chunks"))
+    trace = _as_dict(row.get("rag_trace"))
+    score = _as_float(row.get("retrieval_confidence"))
+    label = _as_text(row.get("retrieval_confidence_label")) or _safe_confidence_band(score) or ""
+    enabled = bool(citations or retrieved_chunks or trace or score is not None)
+    if not enabled and not bool(row.get("safe_review")):
+        return None
+
+    summary = (
+        f"{len(citations)} citations across {len(retrieved_chunks)} retrieved chunks."
+        if enabled
+        else empty_summary
+    )
+    return AICheckRAG(
+        enabled=enabled,
+        confidence_score=score,
+        confidence_label=label,
+        citations_count=len(citations),
+        retrieved_chunk_count=len(retrieved_chunks),
+        query=_as_text(trace.get("query")),
+        collection_name=_as_text(trace.get("collection_name")),
+        safe_review=bool(row.get("safe_review")),
+        summary=summary,
     )
 
 
@@ -162,6 +275,34 @@ class GenAIService:
 
         return AuditResponse(file_id=file_id, role=role, audit=audit, warnings=list(phase["warnings"]))
 
+    async def check(
+        self,
+        *,
+        file_id: str,
+        role: Literal["student", "professor"],
+        user: CurrentUser,
+    ) -> AICheckResponse:
+        await support.load_file(file_id, user)
+        rows = await support.get_rows(
+            f"ai_reports?file_id=eq.{file_id}&role=eq.{role}&select=*&order=created_at.desc&limit=12"
+        )
+        genai_row, graph_row, langchain_row, baseline_row = self._select_check_rows(role, rows)
+        phase = self._phase_payload_or_none(genai_row)
+
+        return AICheckResponse(
+            file_id=file_id,
+            role=role,
+            summary=self._build_check_summary(role, genai_row, baseline_row, phase),
+            langchain=self._build_langchain_check(role, genai_row, langchain_row, baseline_row),
+            langgraph=self._build_langgraph_check(graph_row, phase),
+            genai=self._build_genai_check(role, genai_row, baseline_row, phase),
+            rag=self._build_rag_check(genai_row, baseline_row),
+            ml=self._build_ml_check(genai_row, baseline_row, phase),
+            llm=self._build_llm_check(genai_row, baseline_row),
+            mcp=self._build_mcp_check(role, graph_row),
+            n8n=self._build_n8n_check(role, graph_row),
+        )
+
     async def pdf(
         self,
         *,
@@ -187,6 +328,614 @@ class GenAIService:
         pdf_bytes = build_pdf_bytes(response)
         filename = f"eduaiplatform-{role}-report-{file_id}.pdf"
         return pdf_bytes, filename
+
+    def _select_check_rows(
+        self,
+        role: Literal["student", "professor"],
+        rows: list[dict[str, Any]],
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None]:
+        genai_row: dict[str, Any] | None = None
+        graph_row: dict[str, Any] | None = None
+        langchain_row: dict[str, Any] | None = None
+        baseline_row: dict[str, Any] | None = None
+
+        for row in rows:
+            pipeline = _as_text(_as_dict(row.get("model_versions")).get("pipeline"))
+            normalized = support.normalize_report_row(role, row)
+            if genai_row is None and pipeline == genai_settings.pipeline_label:
+                genai_row = row
+            if graph_row is None and self._has_langgraph_metadata(row):
+                graph_row = normalized
+            if langchain_row is None and (pipeline == "phase10_langchain" or self._has_langchain_metadata(row)):
+                langchain_row = normalized
+            if baseline_row is None:
+                baseline_row = normalized
+
+        return genai_row, graph_row, langchain_row, baseline_row
+
+    def _phase_payload_or_none(self, row: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not isinstance(row, dict):
+            return None
+        try:
+            return self._phase_payload(row)
+        except Exception as exc:
+            logger.warning(
+                "phase15_16 check metadata parse failed file_id=%s error=%s",
+                row.get("file_id"),
+                exc,
+            )
+            return None
+
+    def _prediction_summary(
+        self,
+        role: Literal["student", "professor"],
+        prediction: PredictionTab | None,
+    ) -> str:
+        if prediction is None:
+            return ""
+        report = prediction.report.model_dump(mode="json") if hasattr(prediction.report, "model_dump") else {}
+        return _as_text(extract_best_summary(role, report))
+
+    def _phase7_summary(
+        self,
+        role: Literal["student", "professor"],
+        row: dict[str, Any] | None,
+    ) -> str:
+        report = _as_dict(_as_dict(row).get("report_json"))
+        return _as_text(extract_best_summary(role, report))
+
+    def _build_check_summary(
+        self,
+        role: Literal["student", "professor"],
+        genai_row: dict[str, Any] | None,
+        baseline_row: dict[str, Any] | None,
+        phase: dict[str, Any] | None,
+    ) -> AICheckSummary:
+        if genai_row and phase:
+            prediction = phase["prediction"]
+            report = prediction.report
+            report_confidence = getattr(report, "confidence", None)
+            score = _as_float(getattr(report_confidence, "score", None))
+            band = _as_text(getattr(report_confidence, "band", None)) or _safe_confidence_band(score)
+            safety = getattr(report, "safety", None)
+            return AICheckSummary(
+                selected_pipeline=genai_settings.pipeline_label,
+                status=_as_text(phase["audit"].final_status) or "completed",
+                created_at=genai_row.get("created_at"),
+                needs_review=bool(getattr(safety, "needs_review", False) or genai_row.get("needs_review")),
+                confidence_score=score,
+                confidence_band=band or None,
+                report_summary=self._prediction_summary(role, prediction),
+            )
+
+        if baseline_row:
+            report = _as_dict(baseline_row.get("report_json"))
+            model_versions = _as_dict(baseline_row.get("model_versions"))
+            stored_genai = _as_dict(model_versions.get("genai"))
+            stored_langgraph = _as_dict(model_versions.get("langgraph"))
+            model_agreement = _as_dict(report.get("model_agreement"))
+            agreement = _as_dict(model_versions.get("agreement"))
+            confidence_score = _as_float(_as_dict(report.get("confidence")).get("overall"))
+            if confidence_score is None:
+                confidence_score = _as_float(model_agreement.get("final_confidence"))
+            if confidence_score is None:
+                confidence_score = _as_float(agreement.get("final_confidence"))
+            return AICheckSummary(
+                selected_pipeline=_as_text(model_versions.get("pipeline")) or "phase7",
+                status=_as_text(stored_genai.get("final_status"))
+                or _as_text(stored_langgraph.get("final_status"))
+                or "stored",
+                created_at=baseline_row.get("created_at"),
+                needs_review=bool(
+                    baseline_row.get("needs_review")
+                    or _as_dict(report.get("safety")).get("needs_review")
+                ),
+                confidence_score=confidence_score,
+                confidence_band=_safe_confidence_band(confidence_score),
+                report_summary=self._phase7_summary(role, baseline_row),
+            )
+
+        return AICheckSummary(
+            report_summary="No LangGraph or GenAI report has been stored for this file yet.",
+        )
+
+    def _build_langchain_check(
+        self,
+        role: Literal["student", "professor"],
+        genai_row: dict[str, Any] | None,
+        langchain_row: dict[str, Any] | None,
+        baseline_row: dict[str, Any] | None,
+    ) -> AICheckLangChain:
+        row = next(
+            (
+                candidate
+                for candidate in (langchain_row, genai_row, baseline_row)
+                if self._has_langchain_metadata(candidate)
+            ),
+            None,
+        )
+        if not row:
+            return AICheckLangChain(
+                summary="No stored LangChain execution metadata was found for this file yet.",
+            )
+
+        model_versions = _as_dict(row.get("model_versions"))
+        stored_meta = _as_dict(model_versions.get("langchain"))
+        if stored_meta:
+            return AICheckLangChain(
+                available=bool(stored_meta.get("available", False)),
+                pipeline=_as_text(stored_meta.get("pipeline")) or _as_text(model_versions.get("pipeline")),
+                chain_name=_as_text(stored_meta.get("chain_name")),
+                chain_version=_as_text(stored_meta.get("chain_version")),
+                prompt_version=_as_text(stored_meta.get("prompt_version")),
+                schema_version=_as_text(stored_meta.get("schema_version")),
+                provider=_as_text(stored_meta.get("provider")),
+                model_used=_as_text(stored_meta.get("model_used")),
+                primary_model=_as_text(stored_meta.get("primary_model")),
+                fallback_model=_as_text(stored_meta.get("fallback_model")),
+                fallback_used=bool(stored_meta.get("fallback_used", False)),
+                execution_mode=_as_text(stored_meta.get("execution_mode")),
+                decision_source=_as_text(stored_meta.get("decision_source")),
+                discrepancy_flag=stored_meta.get("discrepancy_flag")
+                if isinstance(stored_meta.get("discrepancy_flag"), bool)
+                else None,
+                retrieval_mode=_as_text(stored_meta.get("retrieval_mode")),
+                retrieved_chunk_count=int(stored_meta.get("retrieved_chunk_count") or 0),
+                confidence_score=_as_float(stored_meta.get("confidence_score")),
+                summary=_as_text(stored_meta.get("summary")),
+            )
+
+        report = _as_dict(row.get("report_json"))
+        retrieval_debug = _as_dict(model_versions.get("retrieval_debug"))
+        pipeline = _as_text(model_versions.get("pipeline"))
+        chain_name = _as_text(model_versions.get("chain_name"))
+        chain_version = _as_text(model_versions.get("chain_version"))
+        prompt_version = _as_text(
+            model_versions.get("student_prompt_version")
+            if role == "student"
+            else model_versions.get("professor_prompt_version")
+        )
+        primary_model = _as_text(model_versions.get("llm_primary"))
+        fallback_model = _as_text(model_versions.get("llm_fallback"))
+        model_used = _as_text(model_versions.get("llm_model_used"))
+        fallback_used = bool(model_versions.get("fallback_used")) or bool(
+            model_used and fallback_model and model_used == fallback_model
+        )
+        execution_mode = _as_text(model_versions.get("execution_mode"))
+        if not execution_mode and (fallback_used or bool(retrieval_debug.get("weak_retrieval"))):
+            execution_mode = "fallback"
+        if not execution_mode:
+            execution_mode = "normal"
+        confidence_score = _as_float(_as_dict(model_versions.get("agreement")).get("final_confidence"))
+        if confidence_score is None:
+            confidence_score = _as_float(_as_dict(report.get("confidence")).get("overall"))
+        if confidence_score is None:
+            confidence_score = _as_float(_as_dict(report.get("model_agreement")).get("final_confidence"))
+        discrepancy_flag_raw = model_versions.get("discrepancy_flag")
+        discrepancy_flag = discrepancy_flag_raw if isinstance(discrepancy_flag_raw, bool) else None
+        retrieved_chunk_count = int(retrieval_debug.get("chunk_count") or 0)
+
+        if pipeline == "phase10_langchain":
+            summary = (
+                f"Stored LangChain output is available with {retrieved_chunk_count} retrieved chunk(s)."
+                if retrieved_chunk_count
+                else "Stored LangChain output is available for this file."
+            )
+        elif pipeline == genai_settings.pipeline_label:
+            summary = (
+                "LangChain foundation metadata was carried into the stored LangGraph/GenAI run."
+            )
+        else:
+            summary = "LangChain-style execution metadata is available from the stored report."
+
+        return AICheckLangChain(
+            available=True,
+            pipeline=pipeline,
+            chain_name=chain_name,
+            chain_version=chain_version,
+            prompt_version=prompt_version,
+            schema_version=_as_text(model_versions.get("schema_version")),
+            provider=_as_text(model_versions.get("provider")),
+            model_used=model_used,
+            primary_model=primary_model,
+            fallback_model=fallback_model,
+            fallback_used=fallback_used,
+            execution_mode=execution_mode,
+            decision_source=_as_text(model_versions.get("decision_source")),
+            discrepancy_flag=discrepancy_flag,
+            retrieval_mode=_as_text(retrieval_debug.get("mode")),
+            retrieved_chunk_count=retrieved_chunk_count,
+            confidence_score=confidence_score,
+            summary=summary,
+        )
+
+    def _has_langchain_metadata(self, row: dict[str, Any] | None) -> bool:
+        model_versions = _as_dict(_as_dict(row).get("model_versions"))
+        pipeline = _as_text(model_versions.get("pipeline"))
+        return bool(
+            pipeline == "phase10_langchain"
+            or _as_dict(model_versions.get("langchain")).get("available")
+            or _as_text(model_versions.get("chain_name"))
+            or _as_text(model_versions.get("chain_version"))
+            or _as_dict(model_versions.get("retrieval_debug"))
+            or _as_dict(model_versions.get("prompt_debug"))
+        )
+
+    def _has_langgraph_metadata(self, row: dict[str, Any] | None) -> bool:
+        model_versions = _as_dict(_as_dict(row).get("model_versions"))
+        pipeline = _as_text(model_versions.get("pipeline"))
+        return bool(
+            pipeline in {"phase12_langgraph", genai_settings.pipeline_label}
+            or _as_dict(model_versions.get("langgraph")).get("available")
+            or _as_dict(model_versions.get("graph"))
+            or _as_dict(model_versions.get("graph_execution"))
+            or _as_dict(model_versions.get("graph_trace"))
+        )
+
+    def _build_langgraph_check(
+        self,
+        graph_row: dict[str, Any] | None,
+        phase: dict[str, Any] | None,
+    ) -> AICheckLangGraph:
+        if not graph_row:
+            return AICheckLangGraph()
+
+        model_versions = _as_dict(graph_row.get("model_versions"))
+        stored_meta = _as_dict(model_versions.get("langgraph"))
+        if stored_meta:
+            graph_trace = _as_dict(model_versions.get("graph_trace"))
+            trace_nodes = _as_list(graph_trace.get("node_entries"))
+            stored_node_count = int(stored_meta.get("node_count") or len(trace_nodes) or 0)
+            stored_total_steps = int(stored_meta.get("total_steps") or 0) or stored_node_count
+            return AICheckLangGraph(
+                available=bool(stored_meta.get("available", False)),
+                pipeline=_as_text(stored_meta.get("pipeline")) or _as_text(model_versions.get("pipeline")),
+                graph_name=_as_text(stored_meta.get("graph_name")),
+                graph_version=_as_text(stored_meta.get("graph_version")) or genai_settings.graph_version,
+                prompt_version=_as_text(stored_meta.get("prompt_version")),
+                output_version=_as_text(stored_meta.get("output_version")),
+                final_status=_as_text(stored_meta.get("final_status")),
+                safe_mode=bool(stored_meta.get("safe_mode", False)),
+                total_steps=stored_total_steps,
+                total_latency_ms=float(stored_meta.get("total_latency_ms") or 0.0),
+                node_count=stored_node_count,
+                decision_count=int(stored_meta.get("decision_count") or 0),
+                failure_count=int(stored_meta.get("failure_count") or 0),
+                trace_summary=_as_text(stored_meta.get("trace_summary")),
+                warnings=[_as_text(item) for item in _as_list(stored_meta.get("warnings")) if _as_text(item)],
+            )
+
+        graph = _as_dict(model_versions.get("graph"))
+        execution = _as_dict(model_versions.get("graph_execution"))
+        trace = _as_dict(model_versions.get("graph_trace"))
+        audit = phase["audit"] if phase else None
+        node_entries = _as_list(trace.get("node_entries"))
+        decision_entries = _as_list(trace.get("decision_entries"))
+        failure_entries = _as_list(trace.get("failure_entries"))
+        total_latency = execution.get("total_latency_ms")
+        if total_latency is None:
+            total_latency = _as_dict(model_versions.get("timings_ms")).get("total") or 0.0
+
+        final_status = _as_text(execution.get("final_status"))
+        if not final_status and audit is not None:
+            final_status = _as_text(audit.final_status)
+
+        safe_mode = bool(execution.get("safe_mode"))
+        if not safe_mode and audit is not None:
+            safe_mode = _as_text(audit.final_status).startswith("safe_mode")
+
+        return AICheckLangGraph(
+            available=True,
+            pipeline=_as_text(model_versions.get("pipeline")),
+            graph_name=_as_text(graph.get("graph_name")),
+            graph_version=_as_text(graph.get("graph_version")) or genai_settings.graph_version,
+            prompt_version=_as_text(graph.get("prompt_version")) or _as_text(getattr(audit, "prompt_version", "")),
+            output_version=_as_text(getattr(audit, "output_version", "")),
+            final_status=final_status,
+            safe_mode=safe_mode,
+            total_steps=int(execution.get("total_steps") or len(node_entries)),
+            total_latency_ms=float(total_latency or 0.0),
+            node_count=len(node_entries),
+            decision_count=len(decision_entries),
+            failure_count=len(failure_entries),
+            trace_summary=_as_text(model_versions.get("graph_trace_summary")) or _as_text(trace.get("summary")),
+            warnings=list(phase["warnings"]) if phase else [],
+        )
+
+    def _build_genai_check(
+        self,
+        role: Literal["student", "professor"],
+        genai_row: dict[str, Any] | None,
+        baseline_row: dict[str, Any] | None,
+        phase: dict[str, Any] | None,
+    ) -> AICheckGenAI:
+        if not genai_row or not phase:
+            stored_meta = _model_versions_section(baseline_row, "genai")
+            if stored_meta:
+                return AICheckGenAI(
+                    available=bool(stored_meta.get("available", False)),
+                    pipeline=_as_text(stored_meta.get("pipeline")) or _as_text(
+                        _as_dict(_as_dict(baseline_row).get("model_versions")).get("pipeline")
+                    ),
+                    model_version=_as_text(stored_meta.get("model_version")),
+                    validator_model_version=_as_text(stored_meta.get("validator_model_version")),
+                    final_status=_as_text(stored_meta.get("final_status")),
+                    confidence_score=_as_float(stored_meta.get("confidence_score")),
+                    confidence_band=_as_text(stored_meta.get("confidence_band")) or None,
+                    report_summary=_as_text(stored_meta.get("report_summary")) or self._phase7_summary(role, baseline_row),
+                    warning_count=int(stored_meta.get("warning_count") or 0),
+                )
+            return AICheckGenAI()
+
+        prediction = phase["prediction"]
+        report = prediction.report
+        report_confidence = getattr(report, "confidence", None)
+        score = _as_float(getattr(report_confidence, "score", None))
+        band = _as_text(getattr(report_confidence, "band", None)) or _safe_confidence_band(score)
+
+        return AICheckGenAI(
+            available=True,
+            pipeline=genai_settings.pipeline_label,
+            model_version=_as_text(phase["audit"].model_version),
+            validator_model_version=_as_text(phase["audit"].validator_model_version),
+            final_status=_as_text(phase["audit"].final_status),
+            confidence_score=score,
+            confidence_band=band or None,
+            report_summary=self._prediction_summary(role, prediction),
+            warning_count=len(phase["warnings"]),
+        )
+
+    def _build_rag_check(
+        self,
+        genai_row: dict[str, Any] | None,
+        baseline_row: dict[str, Any] | None,
+    ) -> AICheckRAG:
+        rag_meta = _as_dict(_as_dict(genai_row).get("rag_meta"))
+        rag_trace = _as_dict(_as_dict(genai_row).get("rag_trace"))
+        if _rag_has_meaningful_data(rag_meta):
+            citations = _as_list(rag_meta.get("citations"))
+            retrieved_chunks = _as_list(rag_meta.get("retrieved_chunks"))
+            trace = _as_dict(rag_meta.get("trace")) or rag_trace
+            score = _as_float(rag_meta.get("confidence_score"))
+            label = _as_text(rag_meta.get("confidence_label")) or _safe_confidence_band(score) or ""
+            enabled = bool(rag_meta.get("enabled") or citations or retrieved_chunks or trace)
+            summary = (
+                f"{len(citations)} citations across {len(retrieved_chunks)} retrieved chunks."
+                if enabled
+                else "RAG grounding metadata was not stored for this run."
+            )
+            return AICheckRAG(
+                enabled=enabled,
+                confidence_score=score,
+                confidence_label=label,
+                citations_count=len(citations),
+                retrieved_chunk_count=len(retrieved_chunks),
+                query=_as_text(trace.get("query")),
+                collection_name=_as_text(trace.get("collection_name")),
+                safe_review=bool(rag_meta.get("safe_review")),
+                summary=summary,
+            )
+
+        genai_storage_rag = _rag_check_from_storage_row(
+            genai_row,
+            empty_summary="RAG grounding metadata was not stored for this run.",
+        )
+        if genai_storage_rag is not None:
+            return genai_storage_rag
+
+        baseline_storage_rag = _rag_check_from_storage_row(
+            baseline_row,
+            empty_summary="No RAG evidence was attached to the stored baseline report.",
+        )
+        if baseline_storage_rag is not None:
+            return baseline_storage_rag
+
+        return AICheckRAG(summary="RAG has not been run or stored for this file yet.")
+
+    def _build_ml_check(
+        self,
+        genai_row: dict[str, Any] | None,
+        baseline_row: dict[str, Any] | None,
+        phase: dict[str, Any] | None,
+    ) -> AICheckML:
+        if baseline_row:
+            stored_meta = _model_versions_section(baseline_row, "ml")
+            if stored_meta:
+                return AICheckML(
+                    available=bool(stored_meta.get("available", False)),
+                    confidence_score=_as_float(stored_meta.get("confidence_score")),
+                    model_names=[_as_text(item) for item in _as_list(stored_meta.get("model_names")) if _as_text(item)],
+                    source=_as_text(stored_meta.get("source")) or _as_text(_as_dict(baseline_row.get("model_versions")).get("pipeline")),
+                    summary=_as_text(stored_meta.get("summary")),
+                )
+            report = _as_dict(baseline_row.get("report_json"))
+            model_versions = _as_dict(baseline_row.get("model_versions"))
+            ml_models = _as_dict(model_versions.get("ml_models"))
+            model_names = [
+                value
+                for raw in ml_models.values()
+                if (value := _as_text(raw))
+            ]
+            ml_score = _as_float(_as_dict(report.get("model_agreement")).get("ml_confidence"))
+            if ml_score is None:
+                bucket = _as_dict(model_versions.get("agreement")).get("ml_bucket_0_to_4")
+                if isinstance(bucket, (int, float)):
+                    ml_score = max(0.0, min(1.0, float(bucket) / 4.0))
+            summary = (
+                f"ML calibration is available from {len(model_names)} stored model signal(s)."
+                if model_names
+                else "ML calibration is available from the stored baseline report."
+            )
+            return AICheckML(
+                available=True,
+                confidence_score=ml_score,
+                model_names=model_names,
+                source=_as_text(model_versions.get("pipeline")) or "phase7",
+                summary=summary,
+            )
+
+        if genai_row and phase:
+            feature_importance = getattr(phase["explanation"], "feature_importance", [])
+            used_ml = any(
+                _as_text(getattr(item, "feature", "")).startswith("ml:")
+                for item in feature_importance
+            )
+            return AICheckML(
+                available=used_ml,
+                source=genai_settings.pipeline_label if used_ml else "",
+                summary=(
+                    "ML calibration contributed to the stored LangGraph explanation."
+                    if used_ml
+                    else "No explicit ML calibration metadata was stored for this GenAI run."
+                ),
+            )
+
+        return AICheckML(summary="ML calibration has not been surfaced for this file yet.")
+
+    def _build_llm_check(
+        self,
+        genai_row: dict[str, Any] | None,
+        baseline_row: dict[str, Any] | None,
+    ) -> AICheckLLM:
+        row = genai_row or baseline_row
+        if not row:
+            return AICheckLLM()
+
+        model_versions = _as_dict(row.get("model_versions"))
+        stored_meta = _as_dict(model_versions.get("llm"))
+        if stored_meta:
+            route = _as_text(stored_meta.get("route"))
+            return AICheckLLM(
+                available=bool(stored_meta.get("available", False) or route),
+                model_used=_as_text(stored_meta.get("model_used")),
+                primary_model=_as_text(stored_meta.get("primary_model")),
+                fallback_model=_as_text(stored_meta.get("fallback_model")),
+                route=route,
+                source=_as_text(stored_meta.get("source")) or _as_text(model_versions.get("pipeline")) or "stored_report",
+            )
+
+        primary_model = _as_text(model_versions.get("llm_primary"))
+        fallback_model = _as_text(model_versions.get("llm_fallback"))
+        model_used = _as_text(model_versions.get("llm_model_used"))
+        route = _route_label(primary_model, fallback_model, model_used)
+
+        return AICheckLLM(
+            available=bool(route),
+            model_used=model_used,
+            primary_model=primary_model,
+            fallback_model=fallback_model,
+            route=route,
+            source=_as_text(model_versions.get("pipeline")) or "stored_report",
+        )
+
+    def _build_mcp_check(
+        self,
+        role: Literal["student", "professor"],
+        graph_row: dict[str, Any] | None,
+    ) -> AICheckMCP:
+        visible_tools: list[str] = []
+        if mcp_settings.enabled:
+            try:
+                import app.mcp  # noqa: F401
+                from app.mcp.enums import ToolRole
+                from app.mcp.registry import list_tools
+
+                role_enum = ToolRole(role)
+                visible_tools = [
+                    defn.tool_name
+                    for defn in list_tools(include_disabled=False)
+                    if role_enum in defn.allowed_roles
+                ][:8]
+            except Exception as exc:
+                logger.warning("phase15_16 mcp tool listing failed role=%s error=%s", role, exc)
+
+        stored_meta = _model_versions_section(graph_row, "mcp")
+        trace = _as_dict(_as_dict(_as_dict(graph_row).get("model_versions")).get("graph_trace"))
+        node_entries = _as_list(trace.get("node_entries"))
+        mcp_steps = [
+            entry
+            for entry in node_entries
+            if _as_text(_as_dict(entry).get("node_name")) == "mcp_tools"
+        ]
+        graph_used = bool(stored_meta.get("graph_used", False)) or len(mcp_steps) > 0
+
+        if stored_meta:
+            return AICheckMCP(
+                enabled=bool(stored_meta.get("enabled", mcp_settings.enabled)),
+                orchestration_enabled=bool(stored_meta.get("orchestration_enabled", mcp_settings.orchestration_enabled)),
+                llm_enabled=bool(stored_meta.get("llm_enabled", mcp_settings.llm_enabled)),
+                graph_used=graph_used,
+                tool_call_count=max(int(stored_meta.get("tool_call_count") or 0), len(mcp_steps)),
+                visible_tools=visible_tools
+                or [_as_text(item) for item in _as_list(stored_meta.get("visible_tools")) if _as_text(item)],
+                summary=_as_text(stored_meta.get("summary")),
+            )
+
+        if not mcp_settings.enabled:
+            summary = "MCP is disabled in backend configuration."
+        elif graph_used:
+            summary = "An MCP bridge node was recorded in the stored LangGraph trace."
+        elif visible_tools:
+            summary = (
+                f"MCP is enabled with {len(visible_tools)} visible tool(s) for this role, "
+                "but no MCP step was recorded for this file."
+            )
+        else:
+            summary = "MCP is enabled, but no visible tools were resolved for this role."
+
+        return AICheckMCP(
+            enabled=mcp_settings.enabled,
+            orchestration_enabled=mcp_settings.orchestration_enabled,
+            llm_enabled=mcp_settings.llm_enabled,
+            graph_used=graph_used,
+            tool_call_count=len(mcp_steps),
+            visible_tools=visible_tools,
+            summary=summary,
+        )
+
+    def _build_n8n_check(
+        self,
+        role: Literal["student", "professor"],
+        graph_row: dict[str, Any] | None,
+    ) -> AICheckN8N:
+        cfg = get_event_settings()
+        trace = _as_dict(_as_dict(_as_dict(graph_row).get("model_versions")).get("graph_trace"))
+        node_entries = _as_list(trace.get("node_entries"))
+        generation_bridge_active = any(
+            _as_text(_as_dict(entry).get("node_name")) == "generation"
+            for entry in node_entries
+        )
+
+        integrations = AICheckN8NIntegrations(
+            assessment=bool(
+                (
+                    cfg.n8n_webhook_path_assessment_student
+                    if role == "student"
+                    else cfg.n8n_webhook_path_assessment_professor
+                ).strip()
+            ),
+            file_upload=bool(cfg.n8n_webhook_path_file_upload.strip()),
+            low_confidence=bool(cfg.n8n_webhook_path_low_confidence.strip()),
+            pipeline_failure=bool(cfg.n8n_webhook_path_pipeline_failure.strip()),
+        )
+        configured = bool(cfg.n8n_base_url.strip() and cfg.n8n_webhook_hmac_secret.strip())
+
+        if configured and generation_bridge_active and integrations.assessment:
+            summary = (
+                "The LangGraph generation node is wired to emit an assessment request to n8n "
+                "for this role when the webhook bridge is reachable."
+            )
+        elif configured:
+            summary = "n8n webhook bridges are configured, but no stored generation trace was found for this file."
+        else:
+            summary = "n8n base URL or webhook signing secret is not fully configured."
+
+        return AICheckN8N(
+            configured=configured,
+            generation_bridge_active=generation_bridge_active,
+            integrations=integrations,
+            summary=summary,
+        )
 
     async def _generate(
         self,
@@ -234,7 +983,7 @@ class GenAIService:
         state.pipeline_context.execution_meta.schema_version = genai_settings.schema_version
         state.pipeline_context.execution_meta.primary_model = genai_settings.primary_model
         state.pipeline_context.execution_meta.fallback_model = genai_settings.validator_model
-        state.pipeline_context.execution_meta.decision_source = DecisionSource.HYBRID.value
+        state.pipeline_context.execution_meta.decision_source = DecisionSource.HYBRID
 
         file_row = await support.load_file(file_id, user)
         ingestion_dict = await support.build_ingestion_bundle(file_id, user)
@@ -248,6 +997,7 @@ class GenAIService:
             "status": file_row.get("status"),
         }
 
+        submission_form = support.classify_submission_form(ingestion_dict)
         submission_kind = support.detect_submission_kind(ingestion_dict)
         state.apply_submission_kind(submission_kind)
         state.input_hash = support.sha256_json(
@@ -255,6 +1005,7 @@ class GenAIService:
                 "file_id": file_id,
                 "submission_id": state.pipeline_context.submission_id,
                 "submission_kind": submission_kind,
+                "submission_form": submission_form,
                 "ingestion": ingestion_bundle.model_dump(mode="json"),
             }
         )
@@ -284,14 +1035,8 @@ class GenAIService:
                 else {},
                 "analysis_type": state.pipeline_context.analysis_type.value,
                 "submission_type": state.pipeline_context.submission_kind,
-                "mode": state.pipeline_context.submission_kind,
-                "query": (
-                    "student writing feedback evidence referencing"
-                    if role == "student" and submission_kind != "project"
-                    else "student architecture implementation testing security"
-                    if role == "student"
-                    else "professor rubric moderation consistency policy"
-                ),
+                "mode": submission_form,
+                "submission_form": submission_form,
             }
             _, rag_context = (
                 pack_student_rag(rag_seed)
@@ -377,9 +1122,11 @@ class GenAIService:
 
         state.pipeline_context.report = response.prediction.report.model_dump(mode="json")
         state.pipeline_context.validation_result = ValidationResult.ok(repaired=bool(state.repaired_report))
+        file_id = support.uuid_or_none(state.file_id)
+        submission_id = support.uuid_or_none(state.submission_id)
         row: dict[str, Any] = {
-            "file_id": state.file_id,
-            "submission_id": state.submission_id,
+            "file_id": file_id,
+            "submission_id": submission_id,
             "role": state.role,
             "report_json": state.pipeline_context.report,
             "report_hash": support.sha256_json(state.pipeline_context.report),
@@ -389,9 +1136,7 @@ class GenAIService:
             "needs_review": bool(response.prediction.report.safety.needs_review),
         }
         rag = state.pipeline_context.rag.model_dump(mode="json") if state.pipeline_context.rag else {}
-        if rag:
-            row["rag_meta"] = rag
-            row["rag_trace"] = rag.get("trace") or {}
+        row.update(build_storage_fields_from_rag_meta(rag))
         stored = await support.post_row("ai_reports", row)
         return _stored_summary(stored)
 
