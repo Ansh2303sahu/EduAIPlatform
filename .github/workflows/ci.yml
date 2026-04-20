@@ -81,4 +81,8 @@ jobs:
         run: |
           docker build -t eduai-backend ./backend
 
-      
+      - name: Backend security scan
+        run: pip install pip-audit && pip-audit
+
+      - name: Frontend audit
+        run: npm audit --omit=dev || true  
