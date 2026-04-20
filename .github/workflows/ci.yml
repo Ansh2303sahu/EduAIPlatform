@@ -39,7 +39,7 @@ jobs:
 
       - name: Compile Python sources
         run: |
-          python -m compileall app tests worker_main.py prof_worker_main.py
+          python -m compileall.
 
       - name: Run backend tests
         env:
