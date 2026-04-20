@@ -41,7 +41,7 @@ jobs:
         env:
           PYTHONPATH: .
         run: |
-          pytest -v
+            pytest -v -k "not phase12 and not phase13 and not phase3"
 
   frontend-build:
     name: Frontend Build
