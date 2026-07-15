@@ -1,129 +1,424 @@
- EduAIPlatform
+# EduAIPlatform
 
-![Python](https://img.shields.io/badge/Python-3.11%2B-blue)
-![FastAPI](https://img.shields.io/badge/Backend-FastAPI-009688)
-![Next.js](https://img.shields.io/badge/Frontend-Next.js-black)
-![Docker](https://img.shields.io/badge/Infrastructure-Docker-2496ED)
-![LLM](https://img.shields.io/badge/LLM-Ollama%20%7C%20Claude-purple)
-![Security](https://img.shields.io/badge/File%20Scanning-ClamAV-success)
+![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-Backend-009688?logo=fastapi&logoColor=white)
+![LangChain](https://img.shields.io/badge/LangChain-RAG%20Pipelines-1C3C3C)
+![LangGraph](https://img.shields.io/badge/LangGraph-Agent%20Orchestration-5B4BDB)
+![Ollama](https://img.shields.io/badge/Ollama-Local%20LLMs-black)
+![ChromaDB](https://img.shields.io/badge/ChromaDB-Vector%20Store-orange)
+![n8n](https://img.shields.io/badge/n8n-Workflow%20Automation-EA4B71?logo=n8n&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-Containerised-2496ED?logo=docker&logoColor=white)
 
-A secure, service-oriented AI platform for **automated assignment ingestion, multimodal content processing, machine-learning analysis, retrieval-augmented context, and LLM-generated student and professor feedback**.
+A secure, full-stack **Generative AI and Agentic AI platform** for automated student assignment assessment, professor review, multimodal document processing, retrieval-augmented generation, explainable feedback and workflow automation.
 
-The project demonstrates how a full-stack application can coordinate document parsing, malware scanning, asynchronous workers, local or hosted LLMs, ML services, and role-aware feedback workflows.
-
----
-
-## Overview
-
-EduAIPlatform processes educational submissions through an end-to-end pipeline:
-
-```text
-Frontend → Backend → Secure Upload → Workers → Parser → AI Service → LLM Service → Feedback
-```
-
-The repository is organised as multiple services rather than a single monolithic application. This allows parsing, AI inference, LLM generation, and background processing to scale and fail independently.
+EduAIPlatform combines **LangChain, LangGraph, Ollama, ChromaDB, hybrid RAG, MCP-style tools, n8n, FastAPI, PyTorch/ONNX and Next.js** in a modular AI system designed around grounded generation, workflow control, security, auditability and human review.
 
 ---
 
-## Implemented Capabilities
+## Project Highlights
 
-### Secure assignment ingestion
-
-- Controlled file uploads
-- Configurable upload limits
-- ClamAV malware scanning
-- Separate storage and retention settings
-- Background ingestion workers
-- Retry and lock-timeout controls
-
-### Multimodal parsing
-
-- Text and document parsing
-- Table and image extraction limits
-- Audio and video processing
-- Whisper-based transcription
-- Separate lightweight and heavyweight worker modes
-
-### AI and ML service
-
-- Independent FastAPI AI service
-- PyTorch and ONNX support
-- Hugging Face model cache
-- Model artefact directory separation
-- Service-to-service authentication secret
-
-### LLM service
-
-- Local model execution through Ollama
-- Configurable primary and fallback models
-- Optional Anthropic provider configuration
-- Controlled context and output-token budgets
-- Low-temperature structured generation
-- Timeouts and retry settings
-- Separate feedback paths for students and professors
-
-### Retrieval and workflow infrastructure
-
-- RAG-oriented storage module
-- Parsing and enrichment stages
-- Background worker orchestration
-- n8n infrastructure directory for workflow automation
-- Supabase integration for storage and application data
+- Built separate **student and professor agent workflows** using LangGraph.
+- Implemented **planner, retrieval, analysis, critic, refiner, decision and guardrail nodes**.
+- Developed an end-to-end **RAG pipeline** with ingestion, chunking, embeddings, vector search, BM25 retrieval, hybrid ranking, reranking, confidence scoring and citations.
+- Integrated **Ollama** for local LLM inference with optional hosted-model support.
+- Used **LangChain** for prompt management, chain construction, parsing, routing and retrieval integration.
+- Implemented **MCP-style tool orchestration** with a registry, planner, executor, policies, audit records, ownership validation, rate limits and workflow history.
+- Automated assessment, audit and exception-handling workflows using **n8n**.
+- Added low-confidence escalation, failed-pipeline retry and human-review-oriented control paths.
+- Added RAG evaluation artefacts and tracing-oriented components.
+- Containerised the multi-service platform with Docker Compose.
 
 ---
 
-## Architecture
+## Problem Statement
+
+Educational assessment platforms must process complex and often unstructured submissions while producing feedback that is:
+
+- Relevant to the submitted work
+- Grounded in course and rubric evidence
+- Suitable for the user's role
+- Explainable and traceable
+- Secure across different users and courses
+- Resilient when models, tools or retrieval components fail
+- Escalated to a human when confidence is insufficient
+
+EduAIPlatform addresses these requirements through a layered AI architecture rather than relying on a single unrestricted LLM call.
+
+---
+
+## System Architecture
 
 ```mermaid
 flowchart TD
-    USER[Student or Professor] --> FE[Next.js Frontend]
-    FE --> BE[FastAPI Backend]
+    U[Student or Professor] --> FE[Next.js Frontend]
+    FE --> API[FastAPI Backend]
 
-    BE --> AUTH[JWT and Role Checks]
-    AUTH --> UPLOAD[Secure Upload Handler]
-    UPLOAD --> CLAM[ClamAV Scanner]
-    CLAM --> STORE[Supabase or Local Storage]
+    API --> AUTH[Authentication, Ownership and Policy Checks]
+    AUTH --> UPLOAD[Secure File Upload]
+    UPLOAD --> AV[ClamAV Malware Scan]
+    AV --> JOB[Background Processing Job]
 
-    STORE --> QUEUE[Ingestion Jobs]
-    QUEUE --> WL[Light Worker]
-    QUEUE --> WH[Heavy Worker]
-    QUEUE --> PH[Professor Worker]
-
-    WL --> PARSER[Parser Service]
-    WH --> PARSER
-    PH --> PARSER
-
-    PARSER --> DOC[Text, Tables and Images]
+    JOB --> PARSER[Multimodal Parser]
+    PARSER --> TEXT[Text, Tables and Images]
     PARSER --> MEDIA[Audio and Video Transcription]
 
-    DOC --> AI[AI Service]
-    MEDIA --> AI
-    AI --> RAG[RAG Context Store]
+    TEXT --> INGEST[RAG Ingestion Pipeline]
+    MEDIA --> INGEST
 
-    RAG --> LLM[LLM Service]
-    AI --> LLM
+    INGEST --> SPLIT[Chunking and Metadata Enrichment]
+    SPLIT --> EMB[Sentence Transformer Embeddings]
+    EMB --> CHROMA[(ChromaDB Vector Store)]
 
-    LLM --> STUDENT[Student Feedback]
-    LLM --> PROF[Professor Report]
-    STUDENT --> BE
-    PROF --> BE
-    BE --> FE
+    API --> GRAPH[LangGraph Agent Engine]
+    GRAPH --> PLAN[Planner Node]
+    PLAN --> RET[Retrieval Node]
+
+    RET --> VECTOR[Vector Retrieval]
+    RET --> BM25[BM25 Retrieval]
+    VECTOR --> HYBRID[Hybrid Rank Fusion]
+    BM25 --> HYBRID
+    HYBRID --> RERANK[Reranker]
+    RERANK --> CONTEXT[Grounded Context + Citations]
+
+    CONTEXT --> ANALYSE[Analysis Node]
+    ANALYSE --> GENERATE[Generation Node]
+    GENERATE --> CRITIC[Critic Node]
+    CRITIC --> REFINE[Refiner Node]
+    REFINE --> GUARD[Final Guardrail]
+    GUARD --> DECIDE[Decision Node]
+
+    DECIDE -->|High confidence| RESULT[Student Feedback or Professor Report]
+    DECIDE -->|Low confidence| ESC[Human Review / n8n Escalation]
+    DECIDE -->|Failure| RETRY[n8n Retry Workflow]
+
+    GRAPH --> TOOLS[MCP-Style Tool Registry]
+    TOOLS --> AUDIT[Audit, Metrics and Workflow History]
+
+    GENERATE --> LLM[Ollama / Hosted LLM Service]
+    RESULT --> API
+    API --> FE
 ```
 
 ---
 
-## Service Map
+## Agentic AI with LangGraph
+
+The platform contains dedicated LangGraph modules for orchestrating stateful, multi-step assessment workflows.
+
+### Implemented graphs
+
+- Student assessment graph
+- Student generative assessment graph
+- Professor assessment graph
+- Professor generative assessment graph
+
+The separate graph paths allow the platform to apply different prompts, policies, evidence requirements and output formats for students and professors.
+
+### Agent nodes
+
+The LangGraph implementation includes nodes for:
+
+| Node | Responsibility |
+|---|---|
+| Input validation | Validates request structure and required fields |
+| Ingestion | Prepares parsed submission content |
+| Planner | Determines the next workflow steps |
+| Retrieval | Retrieves relevant assignment, rubric and knowledge context |
+| Evidence sufficiency | Checks whether retrieved evidence is adequate |
+| Analysis | Analyses submission content against the available context |
+| ML inference | Adds machine-learning model outputs where appropriate |
+| ML context | Transforms ML results into workflow context |
+| Generator | Produces a candidate response |
+| Critic | Reviews the candidate for quality and evidence support |
+| Refiner | Improves the response based on critic feedback |
+| Policy check | Enforces workflow and access policies |
+| RAG decision | Determines whether retrieval evidence is sufficient |
+| ML decision | Interprets model-level outputs |
+| Safe-mode decision | Selects a restricted path when components are unavailable |
+| Final guardrail | Validates the final response before release |
+| Persistence | Stores workflow outcomes and traces |
+| Fallback | Handles failed or unavailable components |
+| MCP tools | Invokes controlled external or internal tools |
+
+### Controlled agent loop
+
+```mermaid
+flowchart LR
+    A[Validate] --> B[Plan]
+    B --> C[Retrieve]
+    C --> D{Evidence sufficient?}
+    D -- No --> E[Refine query or escalate]
+    E --> C
+    D -- Yes --> F[Analyse]
+    F --> G[Generate]
+    G --> H[Critic]
+    H --> I{Pass quality checks?}
+    I -- No --> J[Refine]
+    J --> H
+    I -- Yes --> K[Final guardrail]
+    K --> L[Persist and return]
+```
+
+Loop-control, policy and state modules are separated from the graph nodes to prevent uncontrolled iteration and to make workflow execution easier to test and audit.
+
+---
+
+## Retrieval-Augmented Generation
+
+The platform contains a full RAG subsystem rather than only a vector-database folder.
+
+### Ingestion
+
+The ingestion layer processes educational content and submission artefacts through:
+
+1. File validation and security scanning
+2. Text and multimodal extraction
+3. Content normalisation
+4. Chunk creation
+5. Metadata enrichment
+6. Embedding generation
+7. Vector-store persistence
+8. Integrity validation
+
+### Embeddings and vector storage
+
+- Sentence Transformers generate semantic embeddings.
+- ChromaDB stores vectors and associated metadata.
+- A persisted `chroma.sqlite3` database supports local development.
+- Metadata can be used to scope retrieval by user, course, assignment, document type or other ownership attributes.
+
+### Hybrid retrieval
+
+The retrieval stack combines:
+
+- Dense semantic vector retrieval
+- BM25 lexical retrieval
+- Hybrid result fusion
+- Query construction and topic detection
+- Reranking
+- Confidence calculation
+- Retrieval guards
+- Citation assembly
+- Trace generation
+
+This improves retrieval when exact rubric terminology and semantically similar content must both be considered.
+
+### Grounded generation pipeline
+
+```mermaid
+flowchart LR
+    Q[Assessment Query] --> QB[Query Builder]
+    QB --> DR[Dense Retrieval]
+    QB --> LR[BM25 Retrieval]
+    DR --> HF[Hybrid Fusion]
+    LR --> HF
+    HF --> RR[Reranker]
+    RR --> GS[Guard and Scope Check]
+    GS --> CC[Citation and Context Builder]
+    CC --> LLM[Ollama / LLM]
+    LLM --> VAL[Faithfulness and Output Validation]
+    VAL --> OUT[Grounded Feedback]
+```
+
+### RAG quality controls
+
+The implementation includes components for:
+
+- Citation generation
+- Confidence scoring
+- Retrieval and generation guards
+- Data-integrity checking
+- Query building
+- Topic detection
+- Retrieval tracing
+- Caching
+- RAG analytics
+- Evaluation result storage
+
+---
+
+## LangChain Integration
+
+LangChain is used as an application layer around LLM and retrieval operations.
+
+The codebase contains dedicated modules for:
+
+- Chain construction
+- Prompt templates
+- Input and output parsers
+- Request routing
+- Service abstractions
+- Typed models and schemas
+- LangChain-specific tests
+- Chroma integration
+- Hugging Face embeddings
+- Text splitting
+
+The dependency configuration includes:
+
+```text
+langchain
+langchain-community
+langchain-text-splitters
+langchain-chroma
+langchain-huggingface
+```
+
+This structure keeps prompt, parsing, retrieval and model-provider logic separate from the main API and LangGraph orchestration layers.
+
+---
+
+## Generative AI Layer
+
+The platform contains an independent GenAI package supporting:
+
+- Prompt templates
+- Typed generation schemas
+- Deterministic fallback behaviour
+- Output consistency checking
+- Explainability
+- Fairness-oriented processing
+- PDF report generation
+- Configurable model services
+
+The GenAI layer is used by the LangGraph workflow but remains independently testable.
+
+---
+
+## Ollama and LLM Service
+
+The independent LLM service supports local inference through Ollama.
+
+### Features
+
+- Configurable primary model
+- Configurable fallback model
+- Temperature, top-p and top-k controls
+- Maximum input and output limits
+- Request timeouts
+- Provider abstraction
+- Structured prompts and schemas
+- Separate student and professor prompt paths
+- Optional Anthropic integration
+- Service-level security checks
+
+### Example configuration
+
+```env
+LLM_PROVIDER=ollama
+OLLAMA_BASE_URL=http://host.docker.internal:11434
+OLLAMA_PRIMARY_MODEL=gemma3:4b
+OLLAMA_FALLBACK_MODEL=phi3:mini
+
+OLLAMA_TEMPERATURE=0.15
+OLLAMA_TOP_P=0.9
+OLLAMA_TOP_K=40
+
+LLM_TIMEOUT_SECONDS=120
+LLM_MAX_INPUT_CHARS=12000
+```
+
+Pull the configured models before starting the stack:
+
+```bash
+ollama pull gemma3:4b
+ollama pull phi3:mini
+ollama serve
+```
+
+---
+
+## MCP-Style Tool Orchestration
+
+The backend contains a structured tool-execution layer for agent workflows.
+
+### Core components
+
+- Tool registry
+- Tool schemas and typed handler results
+- LLM-assisted planner
+- Deterministic executor
+- Workflow rules
+- Access and ownership checks
+- Rate limits
+- Timeouts
+- Error handling
+- Docker and GitHub client adapters
+- Audit logging
+- Metrics
+- Cache
+- Workflow history repository and service
+
+### Execution model
+
+```mermaid
+flowchart TD
+    P[Agent Planner] --> REG[Tool Registry]
+    REG --> POL[Policy and Ownership Checks]
+    POL -->|Denied| STOP[Return Controlled Error]
+    POL -->|Allowed| EXEC[Tool Executor]
+    EXEC --> TIME[Timeout and Rate Limit Controls]
+    TIME --> TOOL[Selected Tool]
+    TOOL --> RES[Typed Handler Result]
+    RES --> HIST[Workflow History]
+    RES --> AUDIT[Audit and Metrics]
+    RES --> AGENT[Return to Agent State]
+```
+
+The model proposes tool use, while deterministic code verifies permissions, policies and execution constraints.
+
+---
+
+## n8n Workflow Automation
+
+The repository contains deployable n8n infrastructure and versioned JSON workflows.
+
+### Assessment workflows
+
+- Student assessment workflow
+- Professor assessment workflow
+- Administrator model-usage audit workflow
+
+### Operational workflows
+
+- File-upload event workflow
+- Failed-pipeline retry workflow
+- Low-confidence escalation workflow
+
+These workflows connect application events with operational actions such as retrying failed jobs, routing uncertain AI outputs for review and auditing model activity.
+
+---
+
+## Multimodal Processing
+
+EduAIPlatform supports educational content beyond plain text.
+
+### Supported processing paths
+
+- PDF and document text extraction
+- Table processing
+- Image extraction
+- Audio transcription
+- Video audio extraction and transcription
+- Whisper-based speech-to-text
+- Configurable file-size and duration limits
+- Separate light and heavy workers
+
+The parser and worker design keeps expensive multimodal processing away from synchronous API requests.
+
+---
+
+## Service Architecture
 
 | Service | Default port | Responsibility |
 |---|---:|---|
-| Frontend | `3000` | User interface |
-| Backend | `8000` | API, authentication, storage, jobs and workflow control |
-| AI service | `8010` | ML inference and AI analysis |
-| Parser | `8020` | Document and media parsing |
-| LLM service | `8030` | Local or hosted LLM generation |
-| ClamAV | `3310` | Malware scanning |
-
-Ports and service details may be changed through environment configuration.
+| Frontend | `3000` | Student and professor web experience |
+| Backend | `8000` | API, authentication, jobs, RAG and agent orchestration |
+| AI service | `8010` | ML inference and model-serving functionality |
+| Parser | `8020` | Document and multimodal parsing |
+| LLM service | `8030` | Ollama and optional hosted-LLM inference |
+| ClamAV | `3310` | Uploaded-file malware scanning |
+| n8n | Configurable | Event-driven workflow automation |
 
 ---
 
@@ -131,23 +426,51 @@ Ports and service details may be changed through environment configuration.
 
 ```text
 EduAIPlatform/
-├── .github/                  # CI and repository automation
-├── ai-service/               # ML and AI inference service
-├── backend/                  # Core FastAPI API and background workers
-├── docs/                     # Technical documentation
-├── frontend/                 # Next.js user interface
+├── .github/
+├── ai-service/
+├── backend/
+│   ├── app/
+│   │   ├── api/
+│   │   ├── core/
+│   │   ├── events/
+│   │   ├── genai/
+│   │   ├── langchain/
+│   │   │   ├── parsers/
+│   │   │   ├── prompts/
+│   │   │   ├── routers/
+│   │   │   ├── services/
+│   │   │   └── tests/
+│   │   ├── langgraph/
+│   │   │   ├── adapters/
+│   │   │   ├── graphs/
+│   │   │   ├── nodes/
+│   │   │   └── tracing/
+│   │   ├── mcp/
+│   │   │   └── tools/
+│   │   ├── rag/
+│   │   │   ├── analytics/
+│   │   │   ├── cache/
+│   │   │   ├── ingestion/
+│   │   │   ├── retrieval/
+│   │   │   ├── security/
+│   │   │   └── utils/
+│   │   ├── services/
+│   │   └── worker/
+│   ├── knowledge/
+│   ├── tests/
+│   └── rag_evaluation_results.csv
+├── frontend/
 ├── infra/
-│   └── n8n/                  # Workflow automation assets
-├── llm-service/              # Ollama/Anthropic model service
-├── notebooks/                # Exploration and model development
-├── parser/                   # Document, table, image and media parsing
+│   └── n8n/
+│       └── workflows/
+├── llm-service/
+│   ├── app/
+│   └── tests/
+├── parser/
 ├── storage/
-│   └── rag/                  # Retrieval-oriented storage assets
-├── tools/
-│   └── claude-cli/           # Development tooling
-├── .env.example
+│   └── rag/
+│       └── chroma.sqlite3
 ├── docker-compose.yml
-├── openapi.json
 └── README.md
 ```
 
@@ -155,28 +478,35 @@ EduAIPlatform/
 
 ## Technology Stack
 
-| Layer | Technologies |
+| Area | Technologies |
 |---|---|
+| Agent orchestration | LangGraph |
+| LLM application framework | LangChain |
+| Local LLM inference | Ollama |
+| Optional hosted LLM | Anthropic |
+| RAG and vector database | ChromaDB, Sentence Transformers |
+| Hybrid retrieval | Dense retrieval, BM25, reranking |
+| Tool orchestration | MCP-style registry, planner and executor |
+| Workflow automation | n8n |
+| Backend | FastAPI, Pydantic |
+| ML | PyTorch, ONNX, Hugging Face |
 | Frontend | Next.js, TypeScript |
-| Backend | FastAPI, Python |
-| AI/ML | PyTorch, ONNX, Hugging Face |
-| LLMs | Ollama, Mistral/Gemma/Phi configurations, optional Anthropic |
-| Parsing | Python document parsers, Whisper |
-| Storage | Supabase, local Docker volumes |
-| Security | JWT, service secrets, ClamAV |
-| Infrastructure | Docker Compose, n8n |
-| Languages | Python, TypeScript, JavaScript, Shell |
+| Parsing | PDF/document parsers, faster-whisper |
+| Security | JWT, service secrets, ClamAV, ownership checks |
+| Infrastructure | Docker Compose |
+| Testing | Pytest, service and workflow tests |
 
 ---
 
-## Quick Start with Docker Compose
+## Quick Start
 
 ### Prerequisites
 
-- Docker Desktop or Docker Engine with Compose
 - Git
-- At least one local Ollama model when using the default local provider
-- A Supabase project when enabling Supabase-backed features
+- Docker and Docker Compose
+- Ollama
+- A configured local LLM
+- Supabase credentials for enabled database and storage features
 
 ### 1. Clone the repository
 
@@ -185,34 +515,17 @@ git clone https://github.com/Ansh2303sahu/EduAIPlatform.git
 cd EduAIPlatform
 ```
 
-### 2. Create environment files
-
-Start from the provided template:
+### 2. Configure environment variables
 
 ```bash
 cp .env.example .env
 ```
 
-The Compose configuration also expects service-level environment files such as:
+Create or review the service-specific environment files expected by Docker Compose, including backend and AI-service configuration.
 
-```text
-backend/.env
-ai-service/.env
-```
+Important values include:
 
-Create them from the relevant examples or copy the required values from the root environment template.
-
-On Windows PowerShell:
-
-```powershell
-Copy-Item .env.example .env
-```
-
-### 3. Configure required values
-
-At minimum, review:
-
-```bash
+```env
 ENV=development
 JWT_SECRET=replace_with_a_long_random_secret
 ALLOWED_ORIGINS=http://localhost:3000
@@ -220,20 +533,18 @@ ALLOWED_ORIGINS=http://localhost:3000
 SUPABASE_URL=https://YOUR_PROJECT.supabase.co
 SUPABASE_ANON_KEY=
 SUPABASE_SERVICE_ROLE_KEY=
-ASSIGNMENTS_BUCKET=assignments
 
-AI_SERVICE_SECRET=replace_me
+AI_SERVICE_SECRET=replace_with_a_secure_secret
+
 LLM_PROVIDER=ollama
 OLLAMA_BASE_URL=http://host.docker.internal:11434
 OLLAMA_PRIMARY_MODEL=gemma3:4b
 OLLAMA_FALLBACK_MODEL=phi3:mini
 ```
 
-Never expose `SUPABASE_SERVICE_ROLE_KEY`, service secrets, or real API keys in the frontend or repository.
+Do not commit secrets.
 
-### 4. Install and start Ollama
-
-Example:
+### 3. Start Ollama
 
 ```bash
 ollama pull gemma3:4b
@@ -241,323 +552,179 @@ ollama pull phi3:mini
 ollama serve
 ```
 
-The repository's Compose configuration may use a different primary model label. Ensure the configured model exists locally.
-
-### 5. Start the platform
+### 4. Start the platform
 
 ```bash
 docker compose up --build
 ```
 
-Run in the background:
+Run in detached mode:
 
 ```bash
 docker compose up --build -d
 ```
 
-### 6. Check service health
+### 5. Check the services
 
 ```bash
 docker compose ps
 ```
 
-Useful local endpoints:
+Useful endpoints:
 
-- Backend: `http://localhost:8000`
-- Backend docs: `http://localhost:8000/docs`
+- Frontend: `http://localhost:3000`
+- Backend API: `http://localhost:8000`
+- Swagger UI: `http://localhost:8000/docs`
 - AI service: `http://localhost:8010`
 - LLM service: `http://localhost:8030`
 
-### 7. Stop the platform
+### 6. Stop the platform
 
 ```bash
 docker compose down
 ```
 
-To remove local named volumes as well:
+---
 
-```bash
-docker compose down -v
-```
+## End-to-End Assessment Flow
 
-Use the `-v` option carefully because it deletes persisted development data and caches.
+1. A student or professor submits an assignment or assessment request.
+2. Authentication, ownership and role policies are checked.
+3. Uploaded files are validated and scanned using ClamAV.
+4. A background worker starts the appropriate parsing pipeline.
+5. Text, tables, images or transcribed media are extracted.
+6. The RAG ingestion layer chunks and enriches the content.
+7. Sentence Transformer embeddings are stored in ChromaDB.
+8. LangGraph selects the student or professor workflow.
+9. The planner determines the required retrieval, ML and generation steps.
+10. Dense and BM25 retrieval results are combined and reranked.
+11. Evidence sufficiency and confidence checks are applied.
+12. The GenAI layer generates a candidate response through Ollama.
+13. Critic and refiner nodes improve the result.
+14. Policy and final guardrail nodes validate the output.
+15. High-confidence outputs are returned and persisted.
+16. Low-confidence or failed workflows are routed through n8n escalation or retry paths.
+17. Tool calls, model use and workflow results are logged for auditability.
 
 ---
 
-## Core Processing Flow
+## Security and Governance
 
-1. A student or professor authenticates through the application.
-2. The backend validates role, request metadata, and upload size.
-3. The uploaded file is scanned by ClamAV.
-4. The backend stores the accepted file and creates an ingestion job.
-5. A light or heavy worker claims the job.
-6. The parser extracts supported text, tables, images, audio, or video content.
-7. The AI service performs relevant analysis and feature extraction.
-8. Retrieval context is assembled from available course or assignment material.
-9. The LLM service generates a bounded, structured response.
-10. The backend stores and returns student feedback or a professor-facing report.
+### Input security
 
----
+- Malware scanning with ClamAV
+- File-size and media-duration limits
+- Authentication and JWT validation
+- Role and ownership checks
+- Service-to-service secrets
+- Rate limiting
 
-## Worker Design
+### RAG security
 
-The platform separates workloads to avoid blocking the API.
+- Scoped retrieval
+- Ownership-aware context access
+- Retrieval guard components
+- Integrity checking
+- Metadata filtering
+- Citation-based evidence tracking
 
-### Light worker
+### Agent safety
 
-Designed for smaller documents and routine ingestion tasks.
+- Typed graph state
+- Controlled loop limits
+- Planner and executor separation
+- Tool allow-list through the registry
+- Policy checks before execution
+- Timeouts and rate limits
+- Safe-mode and fallback paths
+- Final output guardrail
+- Low-confidence escalation
 
-### Heavy worker
+### Auditability
 
-Handles expensive media or large parsing tasks with settings for:
-
-- Maximum audio and video size
-- Maximum media duration
-- Audio segmentation
-- Whisper model selection
-- Lock timeouts and retries
-
-### Professor worker
-
-Runs professor-oriented processing separately, supporting different report requirements and workload controls.
-
----
-
-## LLM Configuration
-
-The LLM service supports provider-based configuration.
-
-### Local Ollama
-
-```bash
-LLM_PROVIDER=ollama
-OLLAMA_BASE_URL=http://host.docker.internal:11434
-OLLAMA_PRIMARY_MODEL=gemma3:4b
-OLLAMA_FALLBACK_MODEL=phi3:mini
-OLLAMA_TEMPERATURE=0.15
-OLLAMA_TOP_P=0.9
-OLLAMA_TOP_K=40
-LLM_TIMEOUT_SECONDS=120
-LLM_MAX_INPUT_CHARS=12000
-```
-
-### Anthropic
-
-When the service is configured for Anthropic:
-
-```bash
-LLM_PROVIDER=anthropic
-ANTHROPIC_API_KEY=
-ANTHROPIC_PRIMARY_MODEL=
-ANTHROPIC_FALLBACK_MODEL=
-```
-
-Do not commit provider keys.
+- Workflow history
+- MCP tool audit events
+- Model-usage audit workflow
+- RAG traces
+- Evaluation results
+- Metrics and structured handler results
 
 ---
 
-## Security Model
+## Evaluation
 
-### File security
+The repository contains RAG evaluation output and testing packages across the backend, LLM service and LangChain modules.
 
-- ClamAV scans uploaded files
-- File-size limits reduce resource exhaustion risk
-- Parser limits restrict tables, images, characters, and media duration
-- Scanning and processing use controlled Docker volumes
+Recommended evaluation dimensions include:
 
-### Service isolation
-
-- Internal Docker networking is used for service communication
-- Only selected ports are bound to localhost
-- Backend, parser, AI, and LLM services use shared secrets
-- AI service configuration can disable external browsing and cross-user access
-
-### Data protection
-
-- Backend-only Supabase credentials remain outside the frontend
-- Assignment and AI artefact retention are configurable
-- User data should be isolated by authenticated identity and role
-- Logs should avoid raw submissions and unnecessary personal information
-
-### LLM safety
-
-Recommended controls include:
-
-- Context ownership checks
-- Prompt-injection filtering for retrieved documents
-- Output-schema validation
-- Maximum context and completion limits
-- Provider timeouts and retries
-- Model fallbacks
-- Separate prompts for student and professor outputs
-
----
-
-## RAG Pipeline
-
-The repository includes a RAG-oriented storage component. A production-quality retrieval flow should make each stage explicit:
-
-```mermaid
-flowchart LR
-    A[Course and Assignment Content] --> P[Parse]
-    P --> C[Chunk]
-    C --> E[Enrich Metadata]
-    E --> EMB[Generate Embeddings]
-    EMB --> IDX[Index]
-    Q[User or Workflow Query] --> RET[Retrieve]
-    IDX --> RET
-    RET --> FILTER[Permission and Metadata Filter]
-    FILTER --> CONTEXT[Assemble Context]
-    CONTEXT --> LLM[Generate Grounded Feedback]
-    LLM --> CITE[Return Evidence or Citations]
-```
-
-Important retrieval metadata may include:
-
-- User or course ownership
-- Assignment identifier
-- Document type
-- Page or section
-- Submission timestamp
-- Parser version
-- Chunk and embedding version
-
----
-
-## Evaluation Strategy
-
-A dedicated evaluation harness should measure both component and end-to-end quality.
-
-| Area | Suggested metrics |
+| Layer | Metrics |
 |---|---|
-| Parsing | Extraction completeness, table accuracy, transcription error rate |
-| Retrieval | Recall@k, precision@k, context relevance |
-| Generation | Answer relevance, faithfulness, rubric coverage |
-| Safety | Cross-user access failures, PII leakage, prompt-injection success rate |
-| Workflow | Completion rate, retry rate, worker failure recovery |
-| Performance | P50/P95 latency, tokens, cost, queue time |
-| User value | Feedback usefulness and reviewer agreement |
+| Retrieval | Recall@k, precision@k, MRR, context relevance |
+| Reranking | Ranking improvement and top-k relevance |
+| Generation | Faithfulness, relevance, completeness and rubric coverage |
+| Agents | Task completion, correct routing and decision accuracy |
+| Tools | Tool-selection accuracy, execution success and policy compliance |
+| Safety | Unsupported-claim rate, prompt-injection resistance and data isolation |
+| Operations | P50/P95 latency, retry rate, fallback rate and cost |
+| Human review | Reviewer agreement and escalation precision |
 
-Example evaluation dataset structure:
-
-```json
-{
-  "case_id": "synthetic-001",
-  "role": "student",
-  "assignment_type": "essay",
-  "expected_rubric_points": [
-    "clear argument",
-    "evidence",
-    "critical analysis"
-  ],
-  "forbidden_claims": [
-    "unsupported source attribution"
-  ]
-}
-```
-
----
-
-## Observability
-
-Recommended production instrumentation:
-
-- Correlation IDs across backend, workers, parser, AI, and LLM services
-- Request and job status logs
-- Parse and inference duration
-- Per-model token usage
-- LLM fallback frequency
-- Worker queue depth
-- ClamAV scan failures
-- Retrieval result counts
-- Error and retry rates
-- Storage and retention events
-
-OpenTelemetry traces and Prometheus-compatible metrics are suitable future additions.
-
----
-
-## Testing
-
-Because the platform contains several services, testing should cover:
-
-- Unit tests for each service
-- API contract tests
-- Parser fixture tests
-- Worker retry and locking tests
-- Service-secret authentication tests
-- Upload and malware-rejection tests
-- Retrieval permission tests
-- LLM schema and fallback tests
-- End-to-end Docker Compose smoke tests
-
-Typical commands depend on each service, for example:
+Run the backend tests with:
 
 ```bash
+cd backend
 pytest -q
 ```
 
-and:
+---
 
-```bash
-npm test
-```
+## Example Interview Explanation
 
-Run commands from the relevant service directory when required.
+> EduAIPlatform is a secure, multi-service GenAI assessment platform. I implemented an end-to-end hybrid RAG pipeline using Sentence Transformers, ChromaDB and BM25, with reranking, confidence scoring and citations. LangChain manages retrieval and prompt components, while LangGraph orchestrates separate stateful student and professor agent workflows containing planner, retrieval, evidence, generation, critic, refiner, policy and guardrail nodes. Ollama provides local LLM inference, and n8n handles assessment automation, failed-workflow retries, model-usage auditing and low-confidence escalation. The system also includes MCP-style controlled tool execution, multimodal parsing, background workers, Docker services and security controls such as malware scanning and ownership-aware retrieval.
 
 ---
 
-## Production Readiness Checklist
+## Skills Demonstrated
 
-- [ ] Replace all development secrets
-- [ ] Restrict CORS to approved origins
-- [ ] Configure Supabase row-level security
-- [ ] Store secrets in a managed secret store
-- [ ] Add rate limiting and request quotas
-- [ ] Add PII detection and redaction
-- [ ] Add prompt-injection tests
-- [ ] Add model and prompt version tracking
-- [ ] Add centralised logs, metrics, and traces
-- [ ] Validate retention and deletion workflows
-- [ ] Add backup and disaster-recovery procedures
-- [ ] Perform load, security, and privacy testing
+- Agentic AI architecture
+- LangGraph stateful orchestration
+- LangChain application development
+- Retrieval-augmented generation
+- Hybrid semantic and lexical retrieval
+- Embeddings and vector databases
+- Reranking and citation generation
+- Local LLM deployment with Ollama
+- Prompt and output engineering
+- MCP-style tool calling
+- n8n workflow automation
+- FastAPI microservices
+- Multimodal AI pipelines
+- AI safety and guardrails
+- Workflow auditability
+- Docker and distributed service design
+- Testing and RAG evaluation
 
 ---
 
 ## Roadmap
 
-- [ ] Document the complete RAG implementation and vector store
-- [ ] Add retrieval relevance and faithfulness evaluation
-- [ ] Add visible source citations to generated feedback
-- [ ] Add PII detection and redaction
-- [ ] Add prompt-injection defences for uploaded content
-- [ ] Add OpenTelemetry distributed tracing
+The following are future enhancements rather than descriptions of the existing core stack:
+
+- [ ] Add OpenTelemetry distributed tracing dashboards
+- [ ] Add a dedicated prompt-injection benchmark suite
+- [ ] Add automated faithfulness scoring to CI
+- [ ] Add production secrets management
+- [ ] Add Kubernetes deployment manifests
+- [ ] Add managed vector-store deployment options
 - [ ] Add token and infrastructure cost dashboards
-- [ ] Add fine-tuning or LoRA experimentation for domain feedback
-- [ ] Add model, prompt, parser, and embedding lineage
-- [ ] Add Kubernetes and cloud deployment examples
-
----
-
-## What This Demonstrates
-
-- Python and FastAPI engineering
-- Service-oriented AI architecture
-- LLM integration and provider configuration
-- Background worker orchestration
-- Secure unstructured-content ingestion
-- Multimodal parsing
-- RAG pipeline design
-- Docker Compose infrastructure
-- ML model serving
-- Enterprise security and governance thinking
-- Full-stack TypeScript and Next.js integration
+- [ ] Add LoRA/QLoRA domain adaptation experiments
+- [ ] Add an approval dashboard for escalated assessments
+- [ ] Add automated red-team datasets for agent and RAG workflows
 
 ---
 
 ## Disclaimer
 
-This project is intended for educational and portfolio use. AI-generated educational feedback should support—not replace—qualified academic judgement. Production deployment requires formal privacy, safeguarding, accessibility, security, and institutional governance review.
+EduAIPlatform is an educational and portfolio project. AI-generated feedback should assist rather than replace qualified academic judgement. A real institutional deployment would require additional privacy, safeguarding, accessibility, security, bias and governance review.
 
 ---
 
@@ -565,4 +732,4 @@ This project is intended for educational and portfolio use. AI-generated educati
 
 **Ansh Sahu**  
 BEng Computer Science (Honours)  
-Focus: LLM Engineering, Agentic AI, Secure AI Platforms, and Machine Learning Systems
+Focus: LLM Engineering, Agentic AI, RAG, LangGraph, LangChain and Production AI Systems
